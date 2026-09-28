@@ -2177,13 +2177,17 @@
   // scene added back with 'screen' gives the halos of a rainy night without lifting the blacks.
   const glC1 = document.createElement('canvas'), glX1 = glC1.getContext('2d');
   const glC2 = document.createElement('canvas'), glX2 = glC2.getContext('2d');
+  let glareFrame = 0;
   function veilingGlare() {
     const w1 = Math.max(1, canvas.width >> 3), h1 = Math.max(1, canvas.height >> 3);
     const w2 = Math.max(1, canvas.width >> 5), h2 = Math.max(1, canvas.height >> 5);
-    if (glC1.width !== w1 || glC1.height !== h1) { glC1.width = w1; glC1.height = h1; }
-    if (glC2.width !== w2 || glC2.height !== h2) { glC2.width = w2; glC2.height = h2; }
-    glX1.drawImage(canvas, 0, 0, w1, h1);
-    glX2.drawImage(glC1, 0, 0, w2, h2);
+    // the halo changes slowly: refresh the blurred copies every third frame only
+    if (glC1.width !== w1 || glC1.height !== h1 || glareFrame++ % 3 === 0) {
+      if (glC1.width !== w1 || glC1.height !== h1) { glC1.width = w1; glC1.height = h1; }
+      if (glC2.width !== w2 || glC2.height !== h2) { glC2.width = w2; glC2.height = h2; }
+      glX1.drawImage(canvas, 0, 0, w1, h1);
+      glX2.drawImage(glC1, 0, 0, w2, h2);
+    }
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'screen';
