@@ -1501,10 +1501,11 @@
 
   // ---------- audio ----------
   let audio = null;
-  function createAudio() {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) return null;
-    const ac = new AC(), sr = ac.sampleRate, rnd = Math.random;
+  // the context is created inside the tap (iOS only unlocks audio there); the heavy
+  // synthesis runs a frame later so the page can show that it is preparing
+  function createAudio(ac) {
+    if (!ac) return null;
+    const sr = ac.sampleRate, rnd = Math.random;
     const filter = (type, freq, Q = 0.7, gain = 0) => { const b = ac.createBiquadFilter(); b.type = type; b.frequency.value = freq; b.Q.value = Q; b.gain.value = gain; return b; };
     const gainNode = v => { const g = ac.createGain(); g.gain.value = v; return g; };
     function noiseBuf(sec, pink) {
@@ -2030,10 +2031,13 @@
     $('walkBtn').classList.toggle('on', w);
     $('walkBtn').textContent = w ? '歩く' : '立ち止まる';
   }
-  $('startBtn').addEventListener('click', () => {
-    audio = createAudio();
-    if (audio && audio.ac.state === 'suspended') audio.ac.resume();
-    $('start').remove();
+  $('startBtn').addEventListener('click', e => {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ac = AC ? new AC() : null;
+    if (ac && ac.state === 'suspended') ac.resume();
+    e.currentTarget.disabled = true;
+    e.currentTarget.textContent = '雨音を準備中…';
+    setTimeout(() => { audio = createAudio(ac); $('start').remove(); }, 60);
   });
   $('toggle').addEventListener('click', () => $('panel').classList.toggle('hidden'));
   $('walkBtn').addEventListener('click', () => setWalking(!state.walking));

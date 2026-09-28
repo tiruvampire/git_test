@@ -1179,10 +1179,10 @@
 
   // ---------- Audio (synthesized from physics, no files) ----------
   let audio = null;
-  function createAudio() {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (!AC) return null;
-    const ac = new AC();
+  // the context is created inside the tap (iOS only unlocks audio there); the heavy
+  // synthesis runs a frame later so the page can show that it is preparing
+  function createAudio(ac) {
+    if (!ac) return null;
     const sr = ac.sampleRate;
     const rnd = Math.random;
 
@@ -1783,10 +1783,13 @@
     $('windVal').textContent = `${state.wind0.toFixed(1)} m/s`;
   }
 
-  $('startBtn').addEventListener('click', () => {
-    audio = createAudio();
-    if (audio && audio.ac.state === 'suspended') audio.ac.resume();
-    $('start').remove();
+  $('startBtn').addEventListener('click', e => {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ac = AC ? new AC() : null;
+    if (ac && ac.state === 'suspended') ac.resume();
+    e.currentTarget.disabled = true;
+    e.currentTarget.textContent = '雨音を準備中…';
+    setTimeout(() => { audio = createAudio(ac); $('start').remove(); }, 60);
   });
 
   $('toggle').addEventListener('click', () => panel.classList.toggle('hidden'));
