@@ -1209,7 +1209,7 @@
   const tips = Array.from({ length: U.ribs }, (_, k) => ({ phi0: (k + 0.5) * TAU / U.ribs - Math.PI, phi: 0, V: 0, stream: 0 }));
   const TIP_DRIP_V = 0.6 * 2 * Math.PI * 0.004 * SIGMA / (RHO * G);   // Tate's law, 4 mm tip
   const rimDrops = [], oldTrails = [];
-  let impactsVis = [];
+  let impactsVis = [], impactAcc = 0;
 
   function canopyHit(d) {
     // visible splash flash on the vinyl, and sometimes a bead that stays
@@ -1364,7 +1364,15 @@
       d.x += (state.wind - d.vx) * dt * 0.3;
       if (d.y < -cam.y || d.z < 0.08) rimDrops.splice(i, 1);
     }
-    for (let i = impactsVis.length - 1; i >= 0; i--) { impactsVis[i].age += dt; if (impactsVis[i].age > 0.08) impactsVis.splice(i, 1); }
+    // every drop striking the vinyl makes a tiny crown splash — sampled over the visible canopy
+    // at a rate ∝ R (Poisson), so the umbrella visibly "comes alive" in heavier rain
+    impactAcc += dt * 30 * Math.pow(state.rateNow, 0.8) * (1 - cover) * quality;
+    while (impactAcc >= 1) {
+      impactAcc--;
+      const spot = impactsVis.length < 90 ? visibleCanopySpot() : null;
+      if (spot) impactsVis.push({ th: spot[0], phi: spot[1], age: 0, D: sampleD(state.rateNow), ang: Math.random() * TAU });
+    }
+    for (let i = impactsVis.length - 1; i >= 0; i--) { impactsVis[i].age += dt; if (impactsVis[i].age > 0.09) impactsVis.splice(i, 1); }
   }
 
   // screen snapshot used by the beads as lenses (they show the scene upside down)
@@ -1467,16 +1475,24 @@
       ctx.beginPath(); ctx.arc(sx, sy, R, 0, TAU); ctx.fill();
     }
     // splashes on the film: tiny bright crowns, gone in a few frames
-    ctx.fillStyle = 'rgba(230,236,250,0.35)';
+    // (a spreading ring — the lamella — and a few secondary droplets flung outward)
+    ctx.lineCap = 'round';
     for (const s of impactsVis) {
       const p = canopyPoint(s.th, s.phi);
       if (p[2] < 0.05) continue;
       const sx = cx + f * p[0] / p[2], sy = cy - f * p[1] / p[2];
-      const r = (2 + s.D) * (1 + s.age * 30) * 0.6;
-      ctx.globalAlpha = 1 - s.age / 0.08;
-      ctx.beginPath(); ctx.arc(sx, sy, r, 0, TAU); ctx.fill();
+      const k = f * 1e-3 / p[2], b = coc(p[2]);
+      const t = s.age / 0.09, a = (1 - t) * (0.55 / (1 + b * 0.2));
+      const r = k * s.D * (0.6 + 2.2 * Math.sqrt(t));            // lamella spreads ~√t
+      ctx.strokeStyle = `rgba(235,240,255,${a.toFixed(3)})`;
+      ctx.lineWidth = Math.max(0.6, k * s.D * 0.35) + b * 0.4;
+      ctx.beginPath(); ctx.ellipse(sx, sy, r, r * 0.75, 0, 0, TAU); ctx.stroke();
+      ctx.fillStyle = `rgba(235,240,255,${(a * 0.8).toFixed(3)})`;
+      for (let j = 0; j < 4; j++) {
+        const an = s.ang + j * TAU / 4, rr = r * (1.4 + t * 2.5);
+        ctx.beginPath(); ctx.arc(sx + Math.cos(an) * rr, sy + Math.sin(an) * rr * 0.75, Math.max(0.5, k * s.D * 0.2) + b * 0.25, 0, TAU); ctx.fill();
+      }
     }
-    ctx.globalAlpha = 1;
     ctx.restore();
 
     // 3. ribs: meridians from the rib tips up toward the crown (thin steel, out of focus)
