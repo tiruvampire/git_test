@@ -1034,7 +1034,7 @@
   // A cloud-to-ground discharge as a tortuous 3D channel (mean direction change ≈ 16° per
   // segment, Hill 1968) with branches and a horizontal in-cloud part. The same geometry is
   // drawn on screen and used to synthesise the thunder, so what you see is what you hear.
-  function makeChannel(d, az) {
+  function makeChannel(d, az, intraCloud = false) {
     const h = 1500 + Math.random() * 1500;                  // cloud base height (m)
     const gx = d * Math.sin(az), gz = d * Math.cos(az);
     const segs = [];                                        // [x1,y1,z1,x2,y2,z2,depth]
@@ -1056,10 +1056,10 @@
       }
     }
     const top = [gx + (Math.random() - 0.5) * 800, h, gz + (Math.random() - 0.5) * 800];
-    walk(top[0], top[1], top[2], 0, -1, 0, 0, -HC);
+    if (!intraCloud) walk(top[0], top[1], top[2], 0, -1, 0, 0, -HC);
     // in-cloud horizontal channel: invisible, but responsible for the long rolling rumble
     let x = top[0], z = top[2], hx = Math.random() - 0.5, hz = Math.random() - 0.5;
-    const L = 1000 + Math.random() * 3000;
+    const L = intraCloud ? 3000 + Math.random() * 5000 : 1000 + Math.random() * 3000;
     for (let s = 0; s < L; s += 50) {
       hx += (Math.random() - 0.5) * 0.6; hz += (Math.random() - 0.5) * 0.6;
       const m = Math.hypot(hx, hz) || 1;
@@ -1074,18 +1074,20 @@
     // distance of the strike (m); a tap asks for one close enough to see the channel
     const d = tapX === undefined ? 400 + Math.pow(Math.random(), 1.6) * 9000 : 300 + Math.random() * 3500;
     const az = Math.atan(((tapX ?? W * (0.1 + Math.random() * 0.8)) - cx) / f);
-    const peak = 0.2 + 0.8 * Math.min(1, 1500 / d);
+    // most natural flashes (~¾) never leave the cloud: a dimmer, longer flicker, no visible channel
+    const ic = tapX === undefined && Math.random() < 0.6;
+    const peak = (ic ? 0.35 : 1) * (0.2 + 0.8 * Math.min(1, 1500 / d));
     flashPeak = peak;
     let t = 0;
-    const strokes = 1 + (Math.random() * 4 | 0);            // return strokes flicker
+    const strokes = ic ? 3 + (Math.random() * 5 | 0) : 1 + (Math.random() * 4 | 0);   // return strokes / K-changes flicker
     for (let i = 0; i < strokes; i++) {
-      flashes.push({ delay: t, peak: peak * (i ? 0.45 + Math.random() * 0.5 : 1), age: 0 });
-      t += 0.04 + Math.random() * 0.12;
+      flashes.push({ delay: t, peak: peak * (i ? 0.45 + Math.random() * 0.5 : 1), age: 0, tau: ic ? 0.12 : 0.06 });
+      t += ic ? 0.08 + Math.random() * 0.25 : 0.04 + Math.random() * 0.12;
     }
-    const channel = makeChannel(d, az);
+    const channel = makeChannel(d, az, ic);
     flashX = cx + f * Math.tan(az);
     bolt = null;
-    if (d < 8000) {
+    if (!ic && d < 8000) {
       const w = clamp(f * 6 / d, 0.8, 3.5);
       const segs = [];
       for (const [x1, y1, z1, x2, y2, z2, depth] of channel) {
@@ -1098,7 +1100,7 @@
     // the first sound comes from the nearest point of the channel, not necessarily the strike point
     let rmin = Infinity;
     for (const sg of channel) rmin = Math.min(rmin, Math.hypot(sg[0], sg[1], sg[2]), Math.hypot(sg[3], sg[4], sg[5]));
-    thunderInfo = { d, rmin, t0: performance.now() };
+    thunderInfo = { d, rmin, ic, t0: performance.now() };
     if (navigator.vibrate) navigator.vibrate(30);
   }
 
@@ -1108,8 +1110,8 @@
       const fl = flashes[i];
       fl.age += dt;
       const t = fl.age - fl.delay;
-      if (t >= 0) flashLevel += fl.peak * Math.exp(-t / 0.06);
-      if (t > 0.6) flashes.splice(i, 1);
+      if (t >= 0) flashLevel += fl.peak * Math.exp(-t / fl.tau);
+      if (t > 10 * fl.tau) flashes.splice(i, 1);
     }
     if (!flashes.length) bolt = null;
   }
@@ -1635,8 +1637,9 @@
     if (thunderInfo) {
       const el = (performance.now() - thunderInfo.t0) / 1000, eta = thunderInfo.rmin / SOUND_SPEED;
       const km = (thunderInfo.d / 1000).toFixed(1);
-      if (el < eta) hud.textContent = `⚡ ${km} km 先に落雷 — 雷鳴まで ${(eta - el).toFixed(1)} 秒`;
-      else if (el < eta + 6) hud.textContent = `⚡ ${km} km — ゴロゴロ…`;
+      const what = thunderInfo.ic ? '☁ 雲の中で放電' : '⚡ 落雷';
+      if (el < eta) hud.textContent = `${what} ${km} km — 雷鳴まで ${(eta - el).toFixed(1)} 秒`;
+      else if (el < eta + 6) hud.textContent = `${what} ${km} km — ゴロゴロ…`;
       else thunderInfo = null;
       hud.style.opacity = thunderInfo ? 1 : 0;
     }
