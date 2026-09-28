@@ -221,6 +221,7 @@
       z += len;
     }
     if (b % 2 === 0) blk.lamp = { z: z0 + 3, sodium: r(200) < 0.4 };
+    if (b % 3 === 1) blk.pole = { z: z0 + 7 };                 // utility pole every 36 m
     // puddles collect in the low spots of the paving and along the gutter
     blk.puddles = [];
     const np = (r(400) * 3.2) | 0;
@@ -894,11 +895,68 @@
     }
   }
 
+  // ---------- utility poles and overhead wires (電柱と電線) ----------
+  // Wires hang as catenaries y = a·cosh(x/a); for a small sag s over a span L, a ≈ L²/8s.
+  const POLE_X = CURB + 0.2, POLE_H = 11, SPAN = 36;
+  const WIRES = [[-1.9, 10.2, 0.7], [-1.2, 10.2, 0.7], [-0.5, 10.2, 0.7], [-1.2, 7.2, 1.1], [-1.3, 6.4, 1.3]];   // x, y, sag
+  function wireY(y0, sag, u) {                     // u = distance along the span (0..SPAN)
+    const a = SPAN * SPAN / (8 * sag);
+    return y0 - sag + a * (Math.cosh((u - SPAN / 2) / a) - 1);
+  }
+  function drawPoles(bl) {
+    for (const blk of bl) {
+      if (!blk.pole) continue;
+      const z = blk.pole.z, zr = z - cam.z;
+      // wires to the next pole (drawn even when this pole is behind us)
+      ctx.lineWidth = 1;
+      for (const [wx, wy, sag] of WIRES) {
+        ctx.beginPath();
+        let started = false;
+        for (let k = 0; k <= 18; k++) {
+          const u = SPAN * k / 18, zz = z + u;
+          if (zz - cam.z < 0.3) continue;
+          const q = proj(wx, wireY(wy, sag, u), zz);
+          if (!started) { ctx.moveTo(q.x, q.y); started = true; } else ctx.lineTo(q.x, q.y);
+        }
+        ctx.strokeStyle = 'rgba(8,9,12,0.85)';
+        ctx.stroke();
+      }
+      if (zr < 0.4) continue;
+      const a = proj(POLE_X, 0, z), ax = a.x, ay = a.y, b = proj(POLE_X, POLE_H, z);
+      ctx.strokeStyle = 'rgb(22,24,30)'; ctx.lineWidth = Math.max(1, f * 0.3 / zr);
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(b.x, b.y); ctx.stroke();
+      // crossarm and the pole-top transformer drum
+      const c1 = proj(-2.1, 10.2, z), c1x = c1.x, c1y = c1.y, c2 = proj(-0.3, 10.2, z);
+      ctx.lineWidth = Math.max(0.8, f * 0.1 / zr);
+      ctx.beginPath(); ctx.moveTo(c1x, c1y); ctx.lineTo(c2.x, c2.y); ctx.stroke();
+      const t = proj(POLE_X + 0.35, 8.4, z), tr = f * 0.3 / zr;
+      ctx.fillStyle = 'rgb(28,30,36)';
+      ctx.fillRect(t.x - tr, t.y - tr * 1.3, tr * 2, tr * 2.6);
+    }
+  }
+  // rain gathers on the wires and drips off them (beads spaced by the Rayleigh–Plateau
+  // instability of the water film); sampled, like the arcade edge
+  function updateWireDrips(dt) {
+    const rate = 0.015 * state.rateNow / 3.6e6 / 1e-7;        // drops per metre of wire per s
+    for (const blk of blocks.values()) {
+      if (!blk.pole || blk.pole.z + SPAN < cam.z || blk.pole.z > cam.z + 30) continue;
+      for (const [wx, wy, sag] of WIRES) {
+        const n = rate * SPAN * dt;
+        if (Math.random() < n) {
+          const u = Math.random() * SPAN;
+          if (blk.pole.z + u < cam.z + 1) continue;
+          edgeDrips.push({ x: wx, y: wireY(wy, sag, u), z: blk.pole.z + u, vy: 0, D: 3 });
+        }
+      }
+    }
+  }
+
   function drawCity() {
     lights = [];
     const bl = visibleBlocks();
     // far side of the road first, then lamps and traffic, then our side (near → covers far)
     for (const blk of bl) drawBuildingSide(blk.left, SIDE_L, true, blk);
+    drawPoles(bl);
     for (const blk of bl) if (blk.lamp) drawLamp(blk.lamp);
     drawCars();
     for (const blk of bl) {
@@ -1719,6 +1777,12 @@
     loop(white).connect(filter('bandpass', 1800, 0.7)).connect(curtainGain).connect(panner(-0.6, street));
     const windGain = gainNode(0), windBP = filter('bandpass', 200, 0.6);
     loop(pink).connect(windBP).connect(windGain).connect(street);
+    // overhead wires sing Aeolian tones in the wind: vortex shedding at f = St·U/d (St ≈ 0.2)
+    const aeolian = [0.006, 0.015].map(d => {
+      const bp = filter('bandpass', 300, 30), g = gainNode(0);
+      loop(white).connect(bp).connect(g).connect(street);
+      return { d, bp, g };
+    });
     // the canopy buffeting in the wind, right above the head
     const flapGain = gainNode(0);
     loop(pink).connect(filter('lowpass', 170, 1.5)).connect(flapGain).connect(master);
@@ -1793,6 +1857,10 @@
       roarGain.gain.setTargetAtTime(0.1 * Math.sqrt(Math.min(1, R / 100)), now, 0.5);
       windGain.gain.setTargetAtTime(Math.min(1.3, 0.9 * (u / 12) ** 3), now, 0.15);
       windBP.frequency.setTargetAtTime(90 + u * 22, now, 0.15);
+      for (const a of aeolian) {
+        a.bp.frequency.setTargetAtTime(clamp(0.2 * Math.max(u, 0.5) / a.d, 40, 4000), now, 0.12);
+        a.g.gain.setTargetAtTime(u > 4 ? 0.7 * Math.min(1.5, (u / 12) ** 3) : 0, now, 0.2);
+      }
       flapGain.gain.setTargetAtTime(Math.min(1.2, 0.9 * (u / 10) ** 2 * (0.4 + 0.6 * Math.abs(noise1(time * 0.2 * u * 6 + 700)))), now, 0.05);
     }
     update();
@@ -1972,6 +2040,7 @@
     updateSignalSound(dt);
     updateFlash(dt);
     updateArcadeEdge(dt);
+    updateWireDrips(dt);
     cover += ((inArcade(cam.x, cam.z + 0.1) ? 1 : 0) - cover) * Math.min(1, dt / 0.15);
     let an = 0;
     for (const blk of blocks.values()) if (blk.arcade) {
