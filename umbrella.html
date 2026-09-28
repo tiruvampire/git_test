@@ -990,33 +990,45 @@
     // circular membrane (1, 1.59, 2.14, 2.30, 2.65, 2.92, 3.16, 3.50) with f₀₁ = 2.405/(2πa)·√(T/ρₛ)
     // ≈ 50–110 Hz for a 0.2 m panel of 0.1 kg/m² film at ~50 N/m, heavily damped by the air.
     // Loudness ∝ momentum of the drop (∝ D³·v). Stereo follows where on the canopy it hit.
+    // Each drop is a tiny hammer. Impact force: a pulse lasting τ ≈ D/v with peak ≈ ρv²D²,
+    // so its spectrum is flat up to ~1/τ (≈3 kHz for a 2 mm drop) — bigger drops sound duller
+    // and louder. The vinyl panel answers as a tensioned membrane: Bessel-zero mode ratios
+    // (1, 1.59, 2.14, 2.30, 2.65, 2.92, 3.16, 3.50) on f₀₁ = 2.405/(2πa)·√(T/ρₛ) ≈ 70–110 Hz, plus a
+    // dense set of higher modes. A small panel is a poor radiator at low frequency (radiation
+    // efficiency ∝ (ka)² below ka ≈ 1), so what we hear is mostly the crisp mid–high "patter".
     const MODES = [1, 1.594, 2.136, 2.296, 2.653, 2.918, 3.156, 3.501];
-    const templates = [];
-    for (let k = 0; k < 24; k++) {
-      const f01 = 50 + rnd() * 60, len = Math.floor(0.14 * sr), b = new Float32Array(len);
-      for (let i = 0; i < Math.floor(0.0009 * sr); i++) b[i] += (rnd() * 2 - 1) * (1 - i / (0.0009 * sr)) * 0.9;   // tick
-      let hp = 0, prev = 0;
-      for (let i = 0; i < len; i++) { const v = b[i]; hp = 0.6 * (hp + v - prev); prev = v; b[i] = hp; }        // brighten the tick
-      MODES.forEach((m, j) => {
-        const fr = f01 * m * (1 + (rnd() - 0.5) * 0.04), tau = 0.045 / (1 + 0.35 * j), a = 0.28 / (1 + j * 0.5) * (0.6 + rnd() * 0.8);
-        for (let i = 0; i < len; i++) b[i] += a * Math.sin(TAU * fr * i / sr) * Math.exp(-i / (tau * sr));
+    const radEff = fr => { const ka = TAU * fr / SOUND_SPEED * 0.15; return (ka * ka) / (1 + ka * ka); };
+    const SIZES = [0.7, 1.2, 2.0, 3.2];
+    const templates = SIZES.map(D => {
+      const v = termVel(D), tau = D * 1e-3 / v;
+      return Array.from({ length: 6 }, () => {
+        const len = Math.floor(0.09 * sr), b = new Float32Array(len);
+        // the force pulse (half-sine of duration τ), differentiated: pressure ∝ dF/dt near the film
+        const n = Math.max(2, Math.round(tau * sr));
+        for (let i = 0; i < n + 1; i++) b[i] += Math.cos(Math.PI * i / n) * 0.9;
+        const f01 = 70 + rnd() * 40;
+        const modes = MODES.map(m => f01 * m * (1 + (rnd() - 0.5) * 0.04));
+        for (let j = 0; j < 22; j++) modes.push(300 + rnd() * 2200);
+        for (const fr of modes) {
+          if (fr * tau > 0.8) continue;                              // above the pulse's bandwidth
+          const dec = 0.012 + 0.04 * Math.exp(-fr / 400), a = 0.22 * radEff(fr) * (0.5 + rnd()) / Math.sqrt(1 + fr / 800);
+          const ph = rnd() * TAU;
+          for (let i = 0; i < len; i++) b[i] += a * Math.sin(TAU * fr * i / sr + ph) * Math.exp(-i / (dec * sr));
+        }
+        return { b, amp: RHO * v * v * (D * 1e-3) ** 2 / 0.0005 };  // peak force, normalised
       });
-      // the film also buzzes in the 600–2000 Hz range (many high modes)
-      let y = 0; const a1 = Math.exp(-TAU * 1400 / sr);
-      for (let i = 0; i < Math.floor(0.02 * sr); i++) { y = y * a1 + (rnd() * 2 - 1) * (1 - a1); b[i] += y * 0.8 * Math.exp(-i / (0.006 * sr)); }
-      templates.push(b);
-    }
+    });
     function umbrellaRain(lambda, sec) {
       const len = Math.floor(sr * sec), buf = ac.createBuffer(2, len, sr);
       const L = buf.getChannelData(0), R = buf.getChannelData(1);
       for (let e = 0, n = lambda * sec; e < n; e++) {
         const t0 = Math.floor(rnd() * len);
         const D = 0.5 - Math.log(1 - rnd()) * 0.7;
-        const amp = Math.min(3, D * D * D * termVel(D) / 20);
-        const tpl = templates[(rnd() * templates.length) | 0];
+        const si = D < 0.95 ? 0 : D < 1.6 ? 1 : D < 2.6 ? 2 : 3;
+        const set = templates[si], tpl = set[(rnd() * set.length) | 0];
+        const amp = Math.min(4, tpl.amp * (D / SIZES[si]) ** 2);
         const pan = (rnd() - 0.5) * 1.6, gl = Math.cos((pan + 1) * Math.PI / 4), gr = Math.sin((pan + 1) * Math.PI / 4);
-        const m = D < 1 ? tpl.length >> 2 : tpl.length;
-        for (let k = 0; k < m; k++) { const i = (t0 + k) % len, v = tpl[k] * amp; L[i] += v * gl; R[i] += v * gr; }
+        for (let k = 0; k < tpl.b.length; k++) { const i = (t0 + k) % len, v = tpl.b[k] * amp; L[i] += v * gl; R[i] += v * gr; }
       }
       normalise(L, R, 0.14);
       return buf;
