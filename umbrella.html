@@ -62,6 +62,11 @@
   }
   button.on { background: rgba(125, 211, 252, 0.35); }
   #stats { font-size: 11.5px; color: var(--muted); line-height: 1.6; font-variant-numeric: tabular-nums; }
+  #hud {
+    position: fixed; left: 14px; top: calc(18px + env(safe-area-inset-top));
+    z-index: 6; font-size: 13px; color: var(--text); text-shadow: 0 1px 4px #000;
+    font-variant-numeric: tabular-nums; pointer-events: none; transition: opacity .6s; opacity: 0;
+  }
   #toggle {
     position: fixed; right: 12px; top: calc(12px + env(safe-area-inset-top));
     z-index: 6; padding: 8px 14px; font-size: 13px; background: var(--panel);
@@ -79,6 +84,7 @@
   <a href="index.html">窓辺の雨にもどる</a>
 </div>
 
+<div id="hud"></div>
 <button id="toggle">設定</button>
 
 <div id="panel" class="hidden">
@@ -88,6 +94,7 @@
   <div class="buttons">
     <button id="walkBtn" class="on">歩く</button>
     <button id="focusBtn">ピント: 街</button>
+    <button id="thunderBtn">雷</button>
     <button id="windowBtn">窓辺へ</button>
   </div>
   <div id="stats"></div>
@@ -341,6 +348,31 @@
     gr.addColorStop(0, '#05070d'); gr.addColorStop(0.7, '#141827'); gr.addColorStop(1, '#2c2734');
     ctx.fillStyle = gr;
     ctx.fillRect(0, 0, W, cy + 1);
+    const fl = Math.min(1, flashLevel);
+    if (fl > 0.01) {
+      // the flash lights the cloud deck from inside
+      ctx.globalAlpha = fl;
+      ctx.drawImage(skyLit, 0, cy - skyLit.height, W, skyLit.height);
+      ctx.globalAlpha = 1;
+      drawBolt();
+    }
+  }
+  let skyLit;
+  function paintSkyLit() {
+    skyLit = mkCanvas(W, H);
+    const g = skyLit.getContext('2d');
+    let gr = g.createLinearGradient(0, 0, 0, H);
+    gr.addColorStop(0, '#4a5173'); gr.addColorStop(0.7, '#6d7299'); gr.addColorStop(1, '#8a86a6');
+    g.fillStyle = gr; g.fillRect(0, 0, W, H);
+    for (let i = 0; i < 50; i++) {
+      const x = Math.random() * W, y = Math.random() * H, r = 30 + Math.random() * 140;
+      g.save(); g.translate(x, y); g.scale(1, 0.5);
+      gr = g.createRadialGradient(0, 0, 0, 0, 0, r);
+      const col = Math.random() < 0.5 ? '225,228,255' : '40,44,70';
+      gr.addColorStop(0, `rgba(${col},0.3)`); gr.addColorStop(1, `rgba(${col},0)`);
+      g.fillStyle = gr; g.beginPath(); g.arc(0, 0, r, 0, TAU); g.fill();
+      g.restore();
+    }
   }
 
   function drawGround() {
@@ -1166,6 +1198,10 @@
     fg.addColorStop(1, 'rgba(215,222,235,0.16)');
     ctx.fillStyle = fg;
     ctx.fill();
+    if (flashLevel > 0.01) {                         // the milky film scatters the flash
+      ctx.fillStyle = `rgba(225,230,255,${Math.min(0.35, flashLevel * 0.3).toFixed(3)})`;
+      ctx.fill();
+    }
     ctx.clip();
     // light from the street lamps and shops glowing in the film
     for (const L of nearLights) {
@@ -1287,6 +1323,121 @@
     ctx.strokeStyle = 'rgba(225,228,235,0.18)';
     ctx.lineWidth = f * 0.012 / 0.2 + coc(0.2);
     ctx.beginPath(); ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]); ctx.stroke();
+  }
+
+  // A cloud-to-ground discharge as a tortuous 3D channel (mean direction change ≈ 16° per
+  // segment, Hill 1968) with branches and a horizontal in-cloud part. The same geometry is
+  // drawn on screen and used to synthesise the thunder, so what you see is what you hear.
+  function makeChannel(d, az, intraCloud = false) {
+    const h = 1500 + Math.random() * 1500;                  // cloud base height (m)
+    const gx = d * Math.sin(az), gz = d * Math.cos(az);
+    const segs = [];                                        // [x1,y1,z1,x2,y2,z2,depth]
+    function walk(x, y, z, dx, dy, dz, depth, stopY) {
+      while (y > stopY) {
+        const len = 15 + Math.random() * 45;
+        // pull toward the strike point, randomised by ~16° tortuosity
+        const tx = gx - x, tz = gz - z, ty = -EYE - y, tl = Math.hypot(tx, ty, tz) || 1;
+        dx = dx * 0.55 + tx / tl * 0.45 + (Math.random() - 0.5) * 0.55;
+        dy = dy * 0.55 + ty / tl * 0.45 + (Math.random() - 0.5) * 0.3;
+        dz = dz * 0.55 + tz / tl * 0.45 + (Math.random() - 0.5) * 0.55;
+        const m = Math.hypot(dx, dy, dz); dx /= m; dy /= m; dz /= m;
+        const nx = x + dx * len, ny = Math.max(stopY, y + dy * len), nz = z + dz * len;
+        segs.push([x, y, z, nx, ny, nz, depth]);
+        x = nx; y = ny; z = nz;
+        if (depth < 2 && Math.random() < 0.06) {
+          walk(x, y, z, dx + (Math.random() - 0.5) * 1.5, dy, dz + (Math.random() - 0.5) * 1.5, depth + 1, y - (y + EYE) * (0.2 + Math.random() * 0.4));
+        }
+      }
+    }
+    const top = [gx + (Math.random() - 0.5) * 800, h, gz + (Math.random() - 0.5) * 800];
+    if (!intraCloud) walk(top[0], top[1], top[2], 0, -1, 0, 0, -EYE);
+    // in-cloud horizontal channel: invisible, but responsible for the long rolling rumble
+    let x = top[0], z = top[2], hx = Math.random() - 0.5, hz = Math.random() - 0.5;
+    const L = intraCloud ? 3000 + Math.random() * 5000 : 1000 + Math.random() * 3000;
+    for (let s = 0; s < L; s += 50) {
+      hx += (Math.random() - 0.5) * 0.6; hz += (Math.random() - 0.5) * 0.6;
+      const m = Math.hypot(hx, hz) || 1;
+      const nx = x + hx / m * 50, nz = z + hz / m * 50;
+      segs.push([x, h + 200, z, nx, h + 200 + (Math.random() - 0.5) * 60, nz, 9]);
+      x = nx; z = nz;
+    }
+    return segs;
+  }
+
+  // ---------- lightning ----------
+  const flashes = [];
+  let flashLevel = 0, flashPeak = 1, flashX = 0, bolt = null, thunderInfo = null, nextAutoBolt = 12;
+  function lightning() {
+    const d = 400 + Math.pow(Math.random(), 1.6) * 9000;
+    // looking down a street the sky is a narrow strip, so aim the channel into it
+    const az = (Math.random() - 0.5) * 0.35;
+    const ic = Math.random() < 0.6;                  // ~¾ of flashes stay inside the cloud
+    const peak = (ic ? 0.35 : 1) * (0.2 + 0.8 * Math.min(1, 1500 / d));
+    flashPeak = peak;
+    let t = 0;
+    const strokes = ic ? 3 + (Math.random() * 5 | 0) : 1 + (Math.random() * 4 | 0);
+    for (let i = 0; i < strokes; i++) {
+      flashes.push({ delay: t, peak: peak * (i ? 0.45 + Math.random() * 0.5 : 1), age: 0, tau: ic ? 0.12 : 0.06 });
+      t += ic ? 0.08 + Math.random() * 0.25 : 0.04 + Math.random() * 0.12;
+    }
+    const channel = makeChannel(d, az, ic);
+    flashX = cx + f * Math.tan(az);
+    bolt = !ic && d < 8000 ? { segs: channel.filter(sg => sg[6] <= 2), w: clamp(f * 6 / d, 0.8, 3.5) } : null;
+    if (audio) audio.thunder(channel);
+    let rmin = Infinity;
+    for (const sg of channel) rmin = Math.min(rmin, Math.hypot(sg[0], sg[1], sg[2]), Math.hypot(sg[3], sg[4], sg[5]));
+    thunderInfo = { d, rmin, ic, t0: performance.now() };
+    if (navigator.vibrate) navigator.vibrate(30);
+  }
+  function updateFlash(dt) {
+    if (state.rateNow > 25) {
+      nextAutoBolt -= dt;
+      if (nextAutoBolt <= 0) { lightning(); nextAutoBolt = 5 + Math.random() * 20 * (60 / state.rateNow); }
+    }
+    flashLevel = 0;
+    for (let i = flashes.length - 1; i >= 0; i--) {
+      const fl = flashes[i];
+      fl.age += dt;
+      const t = fl.age - fl.delay;
+      if (t >= 0) flashLevel += fl.peak * Math.exp(-t / fl.tau);
+      if (t > 10 * fl.tau) flashes.splice(i, 1);
+    }
+    if (!flashes.length) bolt = null;
+  }
+  function drawBolt() {
+    if (!bolt || flashLevel < 0.02) return;
+    const a = Math.min(1, flashLevel / flashPeak * 1.2);
+    const paths = [new Path2D(), new Path2D(), new Path2D()];
+    for (const [x1, y1, z1, x2, y2, z2, depth] of bolt.segs) {
+      if (z1 < 50 || z2 < 50) continue;
+      paths[depth].moveTo(cx + f * x1 / z1, cy - f * (y1 - (cam.y - EYE)) / z1);
+      paths[depth].lineTo(cx + f * x2 / z2, cy - f * (y2 - (cam.y - EYE)) / z2);
+    }
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.shadowColor = 'rgba(170,190,255,0.9)';
+    const defocus = focusNear ? 4 : 1;
+    ctx.shadowBlur = 18 * defocus;
+    paths.forEach((p, depth) => {
+      ctx.strokeStyle = `rgba(240,244,255,${a * (1 - depth * 0.2) / Math.sqrt(defocus)})`;
+      ctx.lineWidth = bolt.w * Math.pow(0.5, depth) * defocus;
+      ctx.stroke(p);
+    });
+    ctx.restore();
+  }
+  // in the flash the rain appears frozen: bright short dashes (a stroke lasts < 1 ms)
+  function drawFrozenRain() {
+    const a = Math.min(0.9, flashLevel * 0.9);
+    const p = new Path2D();
+    for (const d of drops) {
+      if (d.z > 12) continue;
+      const sx = cx + f * d.x / d.z, sy = cy - f * d.y / d.z;
+      if (sx < 0 || sx > W || sy < 0 || sy > H) continue;
+      p.moveTo(sx, sy); p.lineTo(sx, sy - Math.max(1.2, f * d.v * 0.004 / d.z));
+    }
+    ctx.lineCap = 'round'; ctx.lineWidth = 1.2;
+    ctx.strokeStyle = `rgba(225,232,255,${a.toFixed(3)})`;
+    ctx.stroke(p);
   }
 
   // ---------- audio ----------
@@ -1542,6 +1693,50 @@
         },
       };
     }
+    // Thunder synthesised from the channel geometry (Few 1969; Ribner & Roy 1982):
+    // every few metres of channel emits an N-wave; it arrives after r / c, with amplitude ∝ ΔL / r
+    // and strongest broadside to the segment. Segments perpendicular to the line of sight arrive
+    // together as a sharp "clap"; the spread of path lengths makes the long rumble. N-waves
+    // lengthen with distance (nonlinear propagation) and air absorption removes the highs.
+    function thunder(channel) {
+      const em = [];
+      let rmin = Infinity, rmax = 0;
+      for (const [x1, y1, z1, x2, y2, z2] of channel) {
+        const sl = Math.hypot(x2 - x1, y2 - y1, z2 - z1), n = Math.max(1, Math.round(sl / 4));
+        const ux = (x2 - x1) / sl, uy = (y2 - y1) / sl, uz = (z2 - z1) / sl;
+        for (let k = 0; k < n; k++) {
+          const t = (k + 0.5) / n, x = x1 + (x2 - x1) * t, y = y1 + (y2 - y1) * t, z = z1 + (z2 - z1) * t;
+          const r = Math.hypot(x, y, z);
+          const cosA = (ux * x + uy * y + uz * z) / r;
+          em.push([r, sl / n, 1 - cosA * cosA]);
+          rmin = Math.min(rmin, r); rmax = Math.max(rmax, r);
+        }
+      }
+      const len = Math.floor(((rmax - rmin) / SOUND_SPEED + 1.5) * sr);
+      const buf = ac.createBuffer(2, len, sr), L = buf.getChannelData(0), Rc = buf.getChannelData(1);
+      for (const [r, dl, broad] of em) {
+        const i0 = Math.floor((r - rmin) / SOUND_SPEED * sr);
+        const T = 0.004 * Math.pow(r / 100, 0.25);             // N-wave duration (s)
+        const fc = clamp(8000 * 300 / r, 60, 8000), a1 = Math.exp(-TAU * fc / sr);
+        const amp = 16 * dl * (0.15 + broad) / r * (0.8 + Math.random() * 0.4);
+        const nT = Math.floor(T * sr), m = nT + Math.floor(4 * sr / (TAU * fc));
+        const pan = (Math.random() - 0.5) * 0.6, gl = 1 - pan, gr = 1 + pan;
+        let y = 0;
+        for (let k = 0; k < m && i0 + k < len; k++) {
+          const v = k < nT ? amp * (1 - 2 * k / nT) : 0;
+          y = y * a1 + v * (1 - a1);
+          L[i0 + k] += y * gl; Rc[i0 + k] += y * gr;
+        }
+      }
+      for (let i = 0; i < len; i++) { L[i] = Math.tanh(L[i]); Rc[i] = Math.tanh(Rc[i]); }
+      const s = ac.createBufferSource();
+      s.buffer = buf;
+      const g = gainNode(1);
+      s.connect(g).connect(street);
+      g.connect(verbSend);                                       // extra echoes off buildings
+      s.start(ac.currentTime + rmin / SOUND_SPEED);
+    }
+
     // someone else's footsteps nearby: the same wet heel strike, quieter and more reverberant
     function otherStep(amp, pan) {
       const t = ac.currentTime;
@@ -1576,7 +1771,7 @@
         note(t, 3100, 2300, 0.07, a * 0.8); note(t + 0.12, 3100, 2300, 0.07, a * 0.8);
       }
     }
-    return { ac, master, update, step, footDrip, carVoice, otherStep, signal };
+    return { ac, master, update, step, footDrip, carVoice, otherStep, signal, thunder };
   }
 
   // ---------- loop ----------
@@ -1629,6 +1824,7 @@
     updateCars(dt);
     updatePeds(dt);
     updateSignalSound(dt);
+    updateFlash(dt);
     if (audio) { audioT += dt; if (audioT > 0.1) { audio.update(); audioT = 0; } }
 
     const kf = Math.min(1, dt / 0.35);
@@ -1647,8 +1843,17 @@
     ctx.fillRect(0, 0, W, H);
     blurScene();
     drawRain();
+    if (flashLevel > 0.08) drawFrozenRain();
     takeSnapshot();
     drawUmbrella();
+    if (flashLevel > 0.005) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const fl = Math.min(1.2, flashLevel);
+      ctx.fillStyle = `rgba(150,160,210,${(fl * 0.12).toFixed(3)})`;
+      ctx.fillRect(0, 0, W, H);
+      ctx.restore();
+    }
     ctx.drawImage(vignette, 0, 0, W, H);
 
     statsT += dt;
@@ -1697,6 +1902,7 @@
     gr.addColorStop(0, 'rgba(0,0,0,0)'); gr.addColorStop(1, 'rgba(0,0,0,0.42)');
     v.fillStyle = gr; v.fillRect(0, 0, W, H);
     drops.length = 0;
+    paintSkyLit();
   }
   window.addEventListener('resize', resize);
   resize();
@@ -1709,11 +1915,21 @@
       `降水強度 ${R.toFixed(1)} mm/h（${rainClass(R)}）・風速 ${state.wind.toFixed(1)} m/s<br>` +
       `平均雨滴径 ${meanD.toFixed(2)} mm・傘の骨の先から ${tipRate < 9 ? tipRate.toFixed(1) + ' 滴/秒' : '水が糸状に流れ落ちる'}<br>` +
       `歩いた距離 ${cam.z.toFixed(0)} m`;
+    if (thunderInfo) {
+      const hud = document.getElementById('hud');
+      const el = (performance.now() - thunderInfo.t0) / 1000, eta = thunderInfo.rmin / SOUND_SPEED;
+      const km = ((thunderInfo.ic ? thunderInfo.rmin : thunderInfo.d) / 1000).toFixed(1);
+      const what = thunderInfo.ic ? '☁ 雲の中で放電' : '⚡ 落雷';
+      if (el < eta) hud.textContent = `${what} ${km} km — 雷鳴まで ${(eta - el).toFixed(1)} 秒`;
+      else if (el < eta + 6) hud.textContent = `${what} ${km} km — ゴロゴロ…`;
+      else thunderInfo = null;
+      hud.style.opacity = thunderInfo ? 1 : 0;
+    }
   }
   seedCanopy();
   for (let i = 0; i < 6; i++) spawnPed(true);
   requestAnimationFrame(frame);
-  if (location.hash === '#debug') window.__umb = { state, cam, cdrops, tips, cars, spawnCar, blocks, get audio() { return audio; } };
+  if (location.hash === '#debug') window.__umb = { state, cam, cdrops, tips, cars, spawnCar, blocks, lightning, get audio() { return audio; } };
 
   // ---------- UI ----------
   const $ = id => document.getElementById(id);
@@ -1743,6 +1959,7 @@
   });
   $('toggle').addEventListener('click', () => $('panel').classList.toggle('hidden'));
   $('walkBtn').addEventListener('click', () => setWalking(!state.walking));
+  $('thunderBtn').addEventListener('click', () => lightning());
   $('focusBtn').addEventListener('click', e => {
     focusNear = !focusNear;
     e.currentTarget.textContent = focusNear ? 'ピント: 傘' : 'ピント: 街';
