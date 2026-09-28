@@ -54,7 +54,7 @@
   .row span:last-child { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
   input[type=range] { width: 100%; accent-color: var(--accent); touch-action: pan-x; }
   .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
-  .buttons button { flex: 1; font-size: 13px; padding: 8px 10px; white-space: nowrap; min-width: 0; }
+  .buttons button { flex: 1 1 calc(33% - 8px); font-size: 13px; padding: 8px 6px; white-space: nowrap; min-width: 0; }
   @media (max-width: 380px) {
     .buttons { gap: 6px; }
     .buttons button { font-size: 12px; padding: 8px 4px; }
@@ -95,6 +95,8 @@
     <button id="walkBtn" class="on">歩く</button>
     <button id="focusBtn">ピント: 街</button>
     <button id="thunderBtn">雷</button>
+    <button id="timerBtn">タイマー</button>
+    <button id="swayBtn" class="on">揺れ</button>
     <button id="windowBtn">窓辺へ</button>
   </div>
   <div id="stats"></div>
@@ -113,7 +115,7 @@
   const APERTURE = 0.006;          // m — night-adapted pupil diameter (depth of field)
   // Where the eye is focused: down the street (9 m) or on the umbrella (0.55 m).
   // Accommodation takes a few hundred ms; looking at the umbrella we also tilt the head up.
-  let focusD = 9, focusNear = false, pitch = 0;
+  let focusD = 9, focusNear = false, pitch = 0, yaw = 0;
   const ZN = 0.35, ZF = 26;        // depth range of the simulated rain (m)
   const RHO = 1000, SIGMA = 0.072, MU = 0.001;
 
@@ -124,6 +126,8 @@
   const state = {
     rate: 7, rateNow: 7, wind0: 1, wind: 1, volume: 0.6,
     walking: true, speed: WALK_SPEED,
+    sway: true,       // head bob / sway (can be turned off for motion-sensitive people)
+    timerEnd: 0, fade: 1,
   };
 
   // ---------- helpers ----------
@@ -179,8 +183,9 @@
     cam.z += state.speed * dt;
     const k = state.speed / WALK_SPEED;
     cam.phase += TAU * STEP_HZ * dt * k;
-    cam.y = EYE + 0.018 * k * Math.cos(cam.phase);
-    cam.x = 0.012 * k * Math.sin(cam.phase / 2);
+    const sw = state.sway ? 1 : 0;
+    cam.y = EYE + 0.018 * k * sw * Math.cos(cam.phase);
+    cam.x = 0.012 * k * sw * Math.sin(cam.phase / 2);
   }
 
   // ---------- the city: generated in 12 m blocks as we walk ----------
@@ -1892,7 +1897,7 @@
       players.forEach(p => p());
       environment(envFacade, cover);
       const now = ac.currentTime, R = state.rateNow, u = Math.abs(state.wind);
-      master.gain.setTargetAtTime(state.volume, now, 0.1);
+      master.gain.setTargetAtTime(state.volume * state.fade, now, 0.1);
       const x = clamp(Math.log(R / 0.3) / Math.log(100 / 0.3), 0, 1);
       const lvl = 0.2 + 0.8 * Math.sqrt(Math.min(1, R / 100));
       streetLight.gain.setTargetAtTime(Math.cos(x * Math.PI / 2) * lvl * 1.2 * 0.7, now, 0.4);
@@ -2121,6 +2126,10 @@
     focusD = Math.exp(Math.log(focusD) + (Math.log(focusNear ? 0.55 : 9) - Math.log(focusD)) * kf);
     pitch += ((focusNear ? 0.22 : 0) - pitch) * Math.min(1, dt / 0.6);
     cy = cy0 + f * Math.tan(pitch);
+    // standing still, the gaze wanders a little (a slow look around)
+    const idle = 1 - Math.min(1, state.speed / WALK_SPEED);
+    yaw += ((state.sway ? idle * 0.06 * noise1(time * 0.08 + 1200) : 0) - yaw) * Math.min(1, dt * 1.5);
+    cx = W / 2 + f * Math.tan(yaw);
 
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     drawSky();
@@ -2223,8 +2232,21 @@
   window.addEventListener('resize', resize);
   resize();
 
+  // sleep timer: the last 90 s fade linearly in dB (to −40 dB), then audio stops
+  const TIMER_STEPS = [0, 15, 30, 60];
+  let timerIdx = 0;
+  function updateTimer() {
+    const btn = document.getElementById('timerBtn');
+    if (!state.timerEnd) { state.fade = 1; btn.textContent = 'タイマー'; return; }
+    const rem = (state.timerEnd - performance.now()) / 1000;
+    state.fade = rem > 90 ? 1 : rem > 0 ? Math.pow(10, -40 * (1 - rem / 90) / 20) : 0;
+    btn.textContent = rem > 0 ? `⏲ ${Math.ceil(rem / 60)}分` : '⏲ 終了';
+    if (rem <= 0 && audio && audio.ac.state === 'running') audio.ac.suspend();
+  }
+
   const statsEl = document.getElementById('stats');
   function updateStats() {
+    updateTimer();
     const R = state.rateNow, L = mpLambda(R), meanD = 0.5 + 1 / L;
     const tipRate = Math.PI * U.R * U.R * R / 3.6e6 / U.ribs / TIP_DRIP_V;
     statsEl.innerHTML =
@@ -2279,6 +2301,18 @@
   $('toggle').addEventListener('click', () => $('panel').classList.toggle('hidden'));
   $('walkBtn').addEventListener('click', () => setWalking(!state.walking));
   $('thunderBtn').addEventListener('click', () => lightning());
+  $('timerBtn').addEventListener('click', e => {
+    timerIdx = (timerIdx + 1) % TIMER_STEPS.length;
+    const min = TIMER_STEPS[timerIdx];
+    state.timerEnd = min ? performance.now() + min * 60000 : 0;
+    e.currentTarget.classList.toggle('on', !!min);
+    if (audio && audio.ac.state === 'suspended') audio.ac.resume();
+    updateTimer();
+  });
+  $('swayBtn').addEventListener('click', e => {
+    state.sway = !state.sway;
+    e.currentTarget.classList.toggle('on', state.sway);
+  });
   $('focusBtn').addEventListener('click', e => {
     focusNear = !focusNear;
     e.currentTarget.textContent = focusNear ? 'ピント: 傘' : 'ピント: 街';
