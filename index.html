@@ -636,6 +636,28 @@
     }
     for (const d of drops) streak(d.x, d.y, d.z, d.vx, -d.v, 0, d.D, focus);
     flushBuckets();
+    if (flashLevel > 0.08) drawFrozenRain(focus);
+  }
+
+  // A return stroke lasts well under a millisecond: in its light each drop moves only a few
+  // millimetres, so the rain appears frozen as bright short dashes over the blurred streaks.
+  function drawFrozenRain(focus) {
+    const a = Math.min(0.9, flashLevel * 0.9);
+    const p = new Path2D();
+    let lw = 0, n = 0;
+    for (const d of drops) {
+      if (d.z > 12) continue;
+      const sx = cx + f * d.x / d.z, sy = cy - f * d.y / d.z;
+      if (sx < -ox || sx > W + ox || sy < -oy || sy > H + oy) continue;
+      const len = Math.max(1.2, f * d.v * 0.004 / d.z);           // ~4 ms of persistence
+      p.moveTo(sx, sy); p.lineTo(sx - f * d.vx * 0.004 / d.z, sy - len);
+      lw += f * d.D * 1e-3 / d.z + f * APERTURE * Math.abs(1 / d.z - 1 / focus); n++;
+    }
+    if (!n) return;
+    ctx.lineCap = 'round';
+    ctx.lineWidth = Math.max(0.8, Math.min(4, lw / n));
+    ctx.strokeStyle = `rgba(225,232,255,${(a / (1 + (state.glass ? 2 : 0))).toFixed(3)})`;
+    ctx.stroke(p);
   }
 
   // ---------- Traffic ----------
