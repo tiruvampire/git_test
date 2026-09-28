@@ -1,0 +1,1220 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Umbrella">
+<meta name="theme-color" content="#05070c">
+<title>Umbrella Walk</title>
+<style>
+  :root {
+    --panel: rgba(12, 18, 32, 0.74);
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #7dd3fc;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #05070c; color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+    overscroll-behavior: none;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #start {
+    position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 16px;
+    background: rgba(5, 7, 12, 0.55); backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px); z-index: 10; text-align: center; padding: 24px;
+  }
+  #start h1 { margin: 0; font-size: 26px; font-weight: 600; letter-spacing: 0.02em; }
+  #start p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.7; }
+  #start a { color: var(--muted); font-size: 13px; }
+  button {
+    font: inherit; color: var(--text); background: rgba(125, 211, 252, 0.15);
+    border: 1px solid rgba(125, 211, 252, 0.4); border-radius: 999px;
+    padding: 10px 20px; cursor: pointer;
+  }
+  button:active { background: rgba(125, 211, 252, 0.3); }
+  #startBtn { font-size: 17px; padding: 14px 32px; }
+  #panel {
+    position: fixed; left: 12px; right: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    background: var(--panel); border-radius: 18px; padding: 14px 16px;
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    display: grid; gap: 10px; z-index: 5; transition: transform .3s, opacity .3s;
+    max-width: 480px; margin: 0 auto;
+  }
+  #panel.hidden { transform: translateY(calc(100% + 40px)); opacity: 0; pointer-events: none; }
+  .row { display: grid; grid-template-columns: 44px 1fr 78px; align-items: center; gap: 10px; font-size: 13px; }
+  .row span:last-child { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); touch-action: pan-x; }
+  .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+  .buttons button { flex: 1; font-size: 13px; padding: 8px 10px; white-space: nowrap; min-width: 0; }
+  @media (max-width: 380px) {
+    .buttons { gap: 6px; }
+    .buttons button { font-size: 12px; padding: 8px 4px; }
+    .row { grid-template-columns: 38px 1fr 70px; }
+  }
+  button.on { background: rgba(125, 211, 252, 0.35); }
+  #stats { font-size: 11.5px; color: var(--muted); line-height: 1.6; font-variant-numeric: tabular-nums; }
+  #toggle {
+    position: fixed; right: 12px; top: calc(12px + env(safe-area-inset-top));
+    z-index: 6; padding: 8px 14px; font-size: 13px; background: var(--panel);
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="start">
+  <h1>☂ ビニール傘で雨の街を歩く</h1>
+  <p>透明な傘越しに見る夜の街<br>
+     タップで 歩く／立ち止まる・左右スワイプで風</p>
+  <button id="startBtn">歩きはじめる（音あり）</button>
+  <a href="index.html">窓辺の雨にもどる</a>
+</div>
+
+<button id="toggle">設定</button>
+
+<div id="panel" class="hidden">
+  <div class="row"><span>雨量</span><input id="rate" type="range" min="0" max="100" value="55"><span id="rateVal"></span></div>
+  <div class="row"><span>風</span><input id="wind" type="range" min="-150" max="150" value="10"><span id="windVal"></span></div>
+  <div class="row"><span>音量</span><input id="volume" type="range" min="0" max="100" value="60"><span id="volumeVal"></span></div>
+  <div class="buttons">
+    <button id="walkBtn" class="on">歩く</button>
+    <button id="windowBtn">窓辺へ</button>
+  </div>
+  <div id="stats"></div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+  const TAU = Math.PI * 2;
+  const G = 9.81;
+  const SOUND_SPEED = 343;
+  const EYE = 1.6;                 // eye height (m)
+  const WALK_SPEED = 1.3;          // m/s, a relaxed walk
+  const STEP_HZ = 1.9;             // steps per second
+  const EXPOSURE = 0.03;           // s — motion-blur time of the eye
+  const APERTURE = 0.004;          // m — pupil diameter (depth of field)
+  const FOCUS = 9;                 // m — we look down the street
+  const ZN = 0.35, ZF = 26;        // depth range of the simulated rain (m)
+  const RHO = 1000, SIGMA = 0.072, MU = 0.001;
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, DPR = 1, f = 1, cx = 0, cy = 0;
+
+  const state = {
+    rate: 7, rateNow: 7, wind0: 1, wind: 1, volume: 0.6,
+    walking: true, speed: WALK_SPEED,
+  };
+
+  // ---------- helpers ----------
+  const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+  const mkCanvas = (w, h) => {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h));
+    return c;
+  };
+  const NOISE_N = 512, noiseTab = new Float32Array(NOISE_N).map(() => Math.random() * 2 - 1);
+  function noise1(x) {
+    const i = Math.floor(x), t = x - i, u = t * t * (3 - 2 * t);
+    const a = noiseTab[i & (NOISE_N - 1)], b = noiseTab[(i + 1) & (NOISE_N - 1)];
+    return a + (b - a) * u;
+  }
+  function pink1(t, seed) {
+    let v = 0, norm = 0;
+    for (let o = 0; o < 6; o++) {
+      const fr = Math.pow(2, o), w = 1 / Math.sqrt(fr);
+      v += w * noise1(t * fr + seed + o * 37.1); norm += w;
+    }
+    return v / norm * 1.8;
+  }
+  // a seeded PRNG so the city is the same each time you pass a given block
+  function hash(n) { n = (n ^ 61) ^ (n >>> 16); n = n + (n << 3); n ^= n >>> 4; n = Math.imul(n, 0x27d4eb2d); n ^= n >>> 15; return (n >>> 0) / 4294967296; }
+
+  // ---------- rain physics (as in the window scene) ----------
+  const termVel = D => Math.max(0.1, 9.65 - 10.3 * Math.exp(-0.6 * D));        // Atlas et al. 1973
+  const mpLambda = R => 4.1 * Math.pow(Math.max(R, 0.05), -0.21);              // Marshall–Palmer
+  function sampleD(R, dmin = 0.5, dmax = 6) {
+    const L = mpLambda(R);
+    return dmin - Math.log(1 - Math.random() * (1 - Math.exp(-L * (dmax - dmin)))) / L;
+  }
+  const visibleDensity = R => { const L = mpLambda(R); return 8000 / L * Math.exp(-0.5 * L); };
+  const rateFromSlider = s => 0.3 * Math.pow(100 / 0.3, s / 100);
+  const rainClass = R => R < 1 ? '小雨' : R < 10 ? '雨' : R < 20 ? 'やや強い雨' : R < 30 ? '強い雨'
+    : R < 50 ? '激しい雨' : R < 80 ? '非常に激しい雨' : '猛烈な雨';
+
+  // ---------- camera: walking gait ----------
+  // Walking is an inverted pendulum: the head rises and falls once per step (~3–4 cm)
+  // and sways sideways once per stride. We keep the amplitudes small — enough to feel
+  // like walking, not enough to make anyone seasick.
+  const cam = { z: 0, x: 0, y: EYE, phase: 0 };
+  function updateCamera(dt) {
+    const target = state.walking ? WALK_SPEED : 0;
+    state.speed += (target - state.speed) * Math.min(1, dt / 0.6);      // start/stop over ~½ s
+    cam.z += state.speed * dt;
+    const k = state.speed / WALK_SPEED;
+    cam.phase += TAU * STEP_HZ * dt * k;
+    cam.y = EYE + 0.018 * k * Math.cos(cam.phase);
+    cam.x = 0.012 * k * Math.sin(cam.phase / 2);
+  }
+
+  // ---------- the city: generated in 12 m blocks as we walk ----------
+  const SIDE_R = 2.2, SIDE_L = -10.5, CURB = -1.4, ROAD_L = -8.4;
+  const SIGNS = ['喫茶', 'ラーメン', '薬', '本', '居酒屋', '花', 'コンビニ', 'パン', '理容', 'クリーニング',
+    '酒', 'カフェ', 'そば', '寿司', '古書', '金物', 'ホテル', '歯科'];
+  const SIGN_COL = [[255, 80, 70], [255, 200, 80], [90, 200, 255], [120, 230, 140], [255, 150, 60], [230, 230, 240], [200, 120, 255]];
+  const blocks = new Map();
+  function makeBlock(b) {
+    const r = k => hash(b * 97 + k);
+    const z0 = b * 12;
+    const blk = { z0, z1: z0 + 12, right: [], left: [], lamp: null, vend: null, cross: r(1) < 0.12 };
+    // right side (our side): 1–2 buildings with a shop on the ground floor
+    let z = z0;
+    for (let i = 0; z < z0 + 12 - 0.5; i++) {
+      const len = Math.min(z0 + 12 - z, 4 + r(10 + i) * 8);
+      const shopLit = r(20 + i) < 0.75;
+      blk.right.push({
+        z0: z, z1: z + len, h: 7 + r(30 + i) * 20,
+        tone: 10 + r(40 + i) * 10 | 0,
+        shop: shopLit ? { warm: r(50 + i) < 0.65, sign: SIGNS[(r(60 + i) * SIGNS.length) | 0], col: SIGN_COL[(r(70 + i) * SIGN_COL.length) | 0] } : null,
+        seed: b * 13 + i,
+      });
+      z += len;
+    }
+    z = z0;
+    for (let i = 0; z < z0 + 12 - 0.5; i++) {
+      const len = Math.min(z0 + 12 - z, 5 + r(110 + i) * 9);
+      blk.left.push({ z0: z, z1: z + len, h: 8 + r(130 + i) * 26, tone: 8 + r(140 + i) * 8 | 0,
+        shop: r(150 + i) < 0.6 ? { warm: r(160 + i) < 0.6, col: SIGN_COL[(r(170 + i) * SIGN_COL.length) | 0] } : null, seed: b * 31 + i });
+      z += len;
+    }
+    if (b % 2 === 0) blk.lamp = { z: z0 + 3, sodium: r(200) < 0.4 };
+    if (r(210) < 0.35) blk.vend = { z: z0 + 4 + r(211) * 5, n: 1 + (r(212) < 0.5 ? 1 : 0) };
+    return blk;
+  }
+  function visibleBlocks() {
+    const b0 = Math.floor((cam.z - 14) / 12), b1 = Math.floor((cam.z + 130) / 12);
+    for (const k of blocks.keys()) if (k < b0) blocks.delete(k);
+    const out = [];
+    for (let b = b1; b >= b0; b--) {
+      if (!blocks.has(b)) blocks.set(b, makeBlock(b));
+      out.push(blocks.get(b));
+    }
+    return out;   // far → near
+  }
+
+  // projection of world coordinates
+  const PX = { x: 0, y: 0, z: 0 };
+  function proj(X, Y, Z) {
+    const z = Z - cam.z;
+    PX.z = z;
+    PX.x = cx + f * (X - cam.x) / z;
+    PX.y = cy - f * (Y - cam.y) / z;
+    return PX;
+  }
+  // a vertical quad on the plane x = X between z0..z1, y0..y1 (clipped at the near plane)
+  function wallQuad(X, z0, z1, y0, y1) {
+    const zn = cam.z + 0.25;
+    if (z1 <= zn) return null;
+    z0 = Math.max(z0, zn);
+    const a = proj(X, y0, z0), ax = a.x, ay = a.y;
+    const b = proj(X, y1, z0), bx = b.x, by = b.y;
+    const c = proj(X, y1, z1), cxx = c.x, cyy = c.y;
+    const d = proj(X, y0, z1);
+    return [ax, ay, bx, by, cxx, cyy, d.x, d.y];
+  }
+  function fillQuad(q) {
+    ctx.beginPath();
+    ctx.moveTo(q[0], q[1]); ctx.lineTo(q[2], q[3]); ctx.lineTo(q[4], q[5]); ctx.lineTo(q[6], q[7]);
+    ctx.closePath(); ctx.fill();
+  }
+
+  // light sources of this frame (for rain illumination and reflections)
+  let lights = [];
+
+  function drawSky() {
+    const gr = ctx.createLinearGradient(0, 0, 0, cy);
+    gr.addColorStop(0, '#05070d'); gr.addColorStop(0.7, '#141827'); gr.addColorStop(1, '#2c2734');
+    ctx.fillStyle = gr;
+    ctx.fillRect(0, 0, W, cy + 1);
+  }
+
+  function drawGround() {
+    let gr = ctx.createLinearGradient(0, cy, 0, H);
+    gr.addColorStop(0, '#121520'); gr.addColorStop(1, '#07090e');
+    ctx.fillStyle = gr;
+    ctx.fillRect(0, cy - 1, W, H - cy + 1);
+    // sidewalk (slightly lighter tiles) and the curb
+    const zn = cam.z + 0.3, zf = cam.z + 400;
+    const s0 = proj(CURB, 0, zn), x0 = s0.x, y0 = s0.y;
+    const s1 = proj(CURB, 0, zf), x1 = s1.x, y1 = s1.y;
+    const s2 = proj(SIDE_R, 0, zf), x2 = s2.x;
+    const s3 = proj(SIDE_R, 0, zn), x3 = s3.x;
+    ctx.fillStyle = 'rgba(40,42,52,0.35)';
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.lineTo(x2, y1); ctx.lineTo(x3, y0); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(120,125,140,0.25)'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+    // centre line dashes and tile joints give the sense of motion
+    ctx.strokeStyle = 'rgba(200,200,190,0.28)';
+    for (let z = Math.ceil(cam.z / 6) * 6; z < cam.z + 90; z += 6) {
+      const a = proj(-4.9, 0, z + 0.01 < cam.z + 0.5 ? cam.z + 0.5 : z), ax = a.x, ay = a.y;
+      const b = proj(-4.9, 0, z + 3);
+      ctx.lineWidth = Math.max(0.6, f * 0.12 / (z + 1.5 - cam.z));
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1;
+    for (let z = Math.ceil(cam.z / 0.6) * 0.6; z < cam.z + 25; z += 0.6) {
+      if (z < cam.z + 0.5) continue;
+      const a = proj(CURB, 0, z), ax = a.x, ay = a.y;
+      const b = proj(SIDE_R, 0, z);
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+  }
+
+  // wet ground: every light has a mirror image below the ground plane, smeared toward
+  // the viewer by the roughness of the asphalt
+  function drawReflections() {
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const L of lights) {
+      const zr = L.z - cam.z;
+      if (zr < 0.6 || !L.refl) continue;
+      const g = proj(L.x, 0, L.z), gx = g.x, gy = g.y;
+      const m = proj(L.x, -L.y, L.z), my = m.y;
+      const w = Math.max(1.5, f * L.size * 0.5 / zr);
+      const len = Math.max(w, (my - gy) * 2.2);
+      ctx.save();
+      ctx.translate(gx, gy + len * 0.5);
+      ctx.scale(1, len / w);
+      const gr = ctx.createRadialGradient(0, 0, 0, 0, 0, w);
+      gr.addColorStop(0, `rgba(${L.col},${L.refl})`); gr.addColorStop(1, `rgba(${L.col},0)`);
+      ctx.fillStyle = gr;
+      ctx.fillRect(-w, -w, w * 2, w * 2);
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  function drawBuildingSide(bs, X, facingRight, blk) {
+    for (const b of bs) {
+      const q = wallQuad(X, b.z0, b.z1, 0, b.h);
+      if (!q) continue;
+      const t = b.tone;
+      ctx.fillStyle = `rgb(${t},${t + 2},${t + 8})`;
+      fillQuad(q);
+      // windows on the upper floors
+      const zr = (b.z0 + b.z1) / 2 - cam.z;
+      if (zr < 120) {
+        for (let fl = 1; fl * 3.1 + 1 < b.h; fl++) {
+          for (let k = 0; k * 2.2 + 1.2 < b.z1 - b.z0; k++) {
+            const hv = hash(b.seed * 1000 + fl * 37 + k);
+            if (hv > 0.45) continue;
+            const wz = b.z0 + 0.6 + k * 2.2, wy = fl * 3.1 + 0.9;
+            const wq = wallQuad(X, wz, wz + 1.2, wy, wy + 1.3);
+            if (!wq) continue;
+            const warm = hv < 0.3;
+            ctx.fillStyle = warm ? `rgba(255,${190 + hv * 100 | 0},120,${0.2 + hv * 0.8})` : `rgba(150,180,220,${0.12 + hv * 0.6})`;
+            fillQuad(wq);
+          }
+        }
+      }
+      // shop front on the ground floor
+      if (b.shop) {
+        const s = b.shop;
+        const wq = wallQuad(X, b.z0 + 0.4, b.z1 - 0.4, 0.15, 2.5);
+        if (wq) {
+          const gr = ctx.createLinearGradient(0, Math.min(wq[3], wq[5]), 0, Math.max(wq[1], wq[7]));
+          const c = s.warm ? '255,205,150' : '215,230,255';
+          gr.addColorStop(0, `rgba(${c},0.8)`); gr.addColorStop(0.55, `rgba(${c},0.55)`); gr.addColorStop(1, `rgba(${c},0.35)`);
+          ctx.fillStyle = gr;
+          fillQuad(wq);
+          // shelves and goods inside, and the window mullions
+          ctx.fillStyle = 'rgba(40,32,28,0.28)';
+          for (const [y0, y1] of [[0.15, 0.9], [1.25, 1.35], [1.75, 1.85]]) {
+            const iq = wallQuad(X, b.z0 + 0.4, b.z1 - 0.4, y0, y1);
+            if (iq) fillQuad(iq);
+          }
+          ctx.fillStyle = 'rgba(20,20,26,0.8)';
+          for (let mz = b.z0 + 0.4; mz <= b.z1 - 0.35; mz += Math.max(1.2, (b.z1 - b.z0 - 0.8) / 3)) {
+            const mq = wallQuad(X, mz, mz + 0.06, 0.15, 2.5);
+            if (mq) fillQuad(mq);
+          }
+        }
+        const zc = (b.z0 + b.z1) / 2;
+        lights.push({ x: X + (facingRight ? 0.5 : -0.5), y: 1.3, z: zc, col: s.warm ? '255,200,140' : '215,230,255',
+          I: 7, size: (b.z1 - b.z0) * 0.5, refl: 0.22 });
+        if (s.sign !== undefined || s.col) {
+          const sq = wallQuad(X, b.z0 + 0.6, b.z1 - 0.6, 2.7, 3.3);
+          if (sq) {
+            ctx.fillStyle = `rgba(${s.col},0.9)`;
+            fillQuad(sq);
+            if (s.sign && zc - cam.z < 40) drawSignText(sq, s.sign, facingRight);
+            lights.push({ x: X + (facingRight ? 0.3 : -0.3), y: 3, z: zc, col: s.col.join(','), I: 3, size: 1, refl: 0.3 });
+          }
+        }
+      }
+    }
+  }
+
+  // text on a sign: an affine map from sign space onto the projected quad (good enough
+  // for a small sign; the exact perspective is barely visible)
+  function drawSignText(q, text, facingRight) {
+    // q: a=(z0,bottom) b=(z0,top) c=(z1,top) d=(z1,bottom)
+    const [ax, ay, bx, by, cxx, cyy] = q;
+    const w = Math.hypot(cxx - bx, cyy - by);
+    if (w < 14) return;
+    ctx.save();
+    // sign space: u along the facade (0..100), v down (0..20)
+    ctx.transform((cxx - bx) / 100, (cyy - by) / 100, (ax - bx) / 20, (ay - by) / 20, bx, by);
+    if (!facingRight) { ctx.translate(100, 0); ctx.scale(-1, 1); }
+    ctx.fillStyle = 'rgba(20,16,14,0.92)';
+    ctx.font = 'bold 15px "Hiragino Sans", sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, 50, 10.5);
+    ctx.restore();
+  }
+
+  function drawVending(v) {
+    // front face at x = 1.45 facing the sidewalk
+    const X = SIDE_R - 0.75;
+    for (let k = 0; k < v.n; k++) {
+      const z0 = v.z + k * 1.0, z1 = z0 + 0.95;
+      const q = wallQuad(X, z0, z1, 0.05, 1.83);
+      if (!q) continue;
+      ctx.fillStyle = 'rgba(240,246,255,0.95)';
+      fillQuad(q);
+      // three rows of drinks behind the display window
+      const cols = ['220,60,50', '60,120,220', '240,190,40', '60,170,90', '230,230,230'];
+      for (let row = 0; row < 3; row++) {
+        for (let i = 0; i < 6; i++) {
+          const cz = z0 + 0.1 + i * 0.13, cyy = 1.15 + row * 0.2;
+          const dq = wallQuad(X - 0.001, cz, cz + 0.08, cyy, cyy + 0.14);
+          if (!dq) continue;
+          ctx.fillStyle = `rgb(${cols[(row * 7 + i * 3 + k) % cols.length]})`;
+          fillQuad(dq);
+        }
+      }
+      ctx.fillStyle = 'rgba(20,30,50,0.55)';
+      const lq = wallQuad(X - 0.001, z0 + 0.1, z1 - 0.1, 0.1, 0.6);
+      if (lq) fillQuad(lq);
+      lights.push({ x: X - 0.2, y: 1.2, z: (z0 + z1) / 2, col: '230,240,255', I: 9, size: 0.9, refl: 0.35 });
+    }
+  }
+
+  function drawLamp(L) {
+    const Xp = CURB + 0.25, Xh = CURB - 0.7, Hh = 5.2;
+    const zr = L.z - cam.z;
+    if (zr < 0.4) return;
+    const a = proj(Xp, 0, L.z), ax = a.x, ay = a.y;
+    const b = proj(Xp, Hh, L.z), bx = b.x, by = b.y;
+    const c = proj(Xh, Hh, L.z), hx = c.x, hy = c.y;
+    ctx.strokeStyle = '#1b1e28';
+    ctx.lineWidth = Math.max(0.6, f * 0.13 / zr);
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.lineTo(hx, hy); ctx.stroke();
+    const col = L.sodium ? '255,172,92' : '235,240,255';
+    const r = f * 2.2 / zr;
+    const gr = ctx.createRadialGradient(hx, hy, 0, hx, hy, r);
+    gr.addColorStop(0, `rgba(${col},0.7)`); gr.addColorStop(0.3, `rgba(${col},0.15)`); gr.addColorStop(1, `rgba(${col},0)`);
+    ctx.fillStyle = gr;
+    ctx.fillRect(hx - r, hy - r, r * 2, r * 2);
+    ctx.fillStyle = 'rgba(255,250,240,0.95)';
+    ctx.beginPath(); ctx.arc(hx, hy, Math.max(0.8, f * 0.12 / zr), 0, TAU); ctx.fill();
+    lights.push({ x: Xh, y: Hh - 0.2, z: L.z, col, I: 18, size: 2, refl: 0.3 });
+  }
+
+  function drawCity() {
+    lights = [];
+    const bl = visibleBlocks();
+    // far side of the road first, then lamps, then our side (near → covers far)
+    for (const blk of bl) drawBuildingSide(blk.left, SIDE_L, true, blk);
+    for (const blk of bl) if (blk.lamp) drawLamp(blk.lamp);
+    for (const blk of bl) {
+      drawBuildingSide(blk.right, SIDE_R, false, blk);
+      if (blk.vend) drawVending(blk.vend);
+    }
+  }
+
+  // ---------- rain around us ----------
+  const drops = [], splashes = [], ripples = [];
+  function spawnDrop(d, initial) {
+    d.z = Math.sqrt(ZN * ZN + Math.random() * (ZF * ZF - ZN * ZN));
+    d.D = sampleD(state.rateNow);
+    d.v = termVel(d.D);
+    const hw = W / 2 + 30, top = cy + 30;
+    d.xl = -hw * d.z / f; d.xr = hw * d.z / f;
+    const ytop = top * d.z / f;                                  // camera-relative
+    const drift = state.wind * (ytop + EYE) / d.v;
+    d.x = d.xl - Math.max(0, drift) + Math.random() * (d.xr - d.xl + Math.abs(drift));
+    d.y = initial ? -EYE + Math.random() * (ytop + EYE) : ytop + Math.random() * 0.3;
+    d.vx = state.wind;
+    if (initial && underUmbrella(d.x, d.y, d.z)) d.y = ytop;
+    return d;
+  }
+  const targetDropCount = () => quality * Math.min(3500, 2.2 * visibleDensity(state.rateNow) * (W * H) / (390 * 844));
+
+  function impact(d) {
+    if (d.z > 12) return;
+    if (ripples.length < 260 * quality && Math.random() < 0.6) {
+      ripples.push({ x: d.x + cam.x, z: d.z + cam.z, age: 0, amp: Math.min(1, Math.sqrt(d.D ** 3 * d.v * d.v) / 40) });
+    }
+    // Cossali et al.: crown splash on a wet surface when K = We·Oh^−0.4 > 2100 + 5880·δ^1.44
+    const Dm = d.D * 1e-3, We = RHO * Dm * d.v * d.v / SIGMA, Oh = MU / Math.sqrt(RHO * SIGMA * Dm);
+    const K = We * Math.pow(Oh, -0.4), Kc = 2100 + 5880 * Math.pow(Math.min(0.5 / d.D, 1.5), 1.44);
+    if (d.z < 7 && K > Kc && splashes.length < 600 * quality) {
+      const ex = K / Kc - 1, n = Math.min(10, (2 + 3 * ex + Math.random() * 2) | 0), s0 = d.v * (0.12 + 0.05 * Math.min(ex, 3));
+      for (let k = 0; k < n; k++) {
+        const el = (15 + Math.random() * 50) * Math.PI / 180, az = Math.random() * TAU, sp = s0 * (0.6 + Math.random() * 0.8);
+        splashes.push({ x: d.x, y: -EYE + 0.001, z: d.z, vx: sp * Math.cos(el) * Math.cos(az) + d.vx * 0.2,
+          vy: sp * Math.sin(el), vz: sp * Math.cos(el) * Math.sin(az), D: d.D * (0.1 + Math.random() * 0.25) / Math.sqrt(1 + ex) });
+      }
+    }
+  }
+
+  function updateRain(dt) {
+    const target = targetDropCount() | 0;
+    while (drops.length < target) drops.push(spawnDrop({}, true));
+    if (drops.length > target) drops.length = target;
+    const vz = -state.speed;            // the world streams toward us as we walk
+    const dy = cam.y - camYPrev;
+    for (const d of drops) {
+      const tau = d.v / G;
+      d.vx += (state.wind - d.vx) * Math.min(1, dt / tau);
+      d.x += d.vx * dt;
+      d.y -= d.v * dt + dy;
+      d.z += vz * dt;
+      if (d.y <= -cam.y) { impact(d); spawnDrop(d, false); }
+      else if (d.z < ZN * 0.5 || d.x < d.xl - 3 || d.x > d.xr + 3) spawnDrop(d, false);
+      else if (underUmbrella(d.x, d.y, d.z)) { canopyHit(d); spawnDrop(d, false); }
+    }
+    for (let i = splashes.length - 1; i >= 0; i--) {
+      const s = splashes[i];
+      s.vy -= G * dt;
+      s.x += s.vx * dt; s.y += s.vy * dt - dy; s.z += (s.vz + vz) * dt;
+      if (s.y < -cam.y || s.z < 0.2) { splashes[i] = splashes[splashes.length - 1]; splashes.pop(); }
+    }
+    for (let i = ripples.length - 1; i >= 0; i--) {
+      const r = ripples[i];
+      r.age += dt;
+      if (r.age > 1.4 || r.z < cam.z + 0.3) { ripples[i] = ripples[ripples.length - 1]; ripples.pop(); }
+    }
+  }
+  let camYPrev = EYE;
+
+  // ---------- lighting of the rain ----------
+  const AB = 7, AMAX = 0.85, WB = 5, WREP = [0.6, 1.1, 1.9, 3.2, 5.5], WEDGE = [0.85, 1.5, 2.5, 4.2];
+  const TINTS = ['200,208,225', '255,208,160', '235,240,255'];
+  let buckets = [];
+  function bucket(alpha, width, tint) {
+    if (alpha < 0.012) return null;
+    const ai = Math.min(AB - 1, (alpha / AMAX * AB) | 0);
+    let wi = 0;
+    while (wi < 4 && width > WEDGE[wi]) wi++;
+    const k = (tint * AB + ai) * WB + wi;
+    return buckets[k] || (buckets[k] = new Path2D());
+  }
+  function flushBuckets() {
+    ctx.lineCap = 'round';
+    for (let k = 0; k < buckets.length; k++) {
+      const p = buckets[k];
+      if (!p) continue;
+      const wi = k % WB, ai = ((k / WB) | 0) % AB, tint = (k / (WB * AB)) | 0;
+      ctx.strokeStyle = `rgba(${TINTS[tint]},${((ai + 0.5) / AB * AMAX).toFixed(3)})`;
+      ctx.lineWidth = WREP[wi];
+      ctx.stroke(p);
+    }
+    buckets = [];
+  }
+  // radiance: ambient + nearby lights (1/d², Henyey–Greenstein forward scattering)
+  const SKY_E = 1.2, HG_G = 0.55;
+  let illumE = 0, illumTint = 0, nearLights = [];
+  function illuminate(x, y, z) {
+    const vl = Math.hypot(x, y, z) || 1;
+    let warm = 0, cool = 0;
+    for (const L of nearLights) {
+      const dx = x - L.cx, dy = y - L.cy, dz = z - L.cz;
+      const d2 = dx * dx + dy * dy + dz * dz, d = Math.sqrt(d2);
+      const cos = -(dx * x + dy * y + dz * z) / (d * vl);
+      const ph = (1 - HG_G * HG_G) / Math.pow(1 + HG_G * HG_G - 2 * HG_G * cos, 1.5);
+      const e = L.I * ph / (d2 + 0.6);
+      if (L.warm) warm += e; else cool += e;
+    }
+    illumE = SKY_E + warm + cool;
+    illumTint = cool > SKY_E * 0.8 && cool > warm ? 2 : warm > SKY_E * 0.8 ? 1 : 0;
+  }
+  function streak(x, y, z, vx, vy, vz, D) {
+    const x2 = x - vx * EXPOSURE, y2 = y - vy * EXPOSURE, z2 = z - vz * EXPOSURE;
+    if (z < 0.15 || z2 < 0.15) return;
+    const s1x = cx + f * x / z, s1y = cy - f * y / z, s2x = cx + f * x2 / z2, s2y = cy - f * y2 / z2;
+    if ((s1x < 0 && s2x < 0) || (s1x > W && s2x > W) || (s1y < 0 && s2y < 0) || s2y > H) return;
+    const wPhys = f * D * 1e-3 / z, coc = f * APERTURE * Math.abs(1 / z - 1 / FOCUS);
+    const width = Math.max(0.5, wPhys) + coc;
+    const speed = Math.max(0.3, Math.hypot(vx, vy, vz));
+    illuminate(x, y, z);
+    const alpha = 42 * (D * 1e-3 / (speed * EXPOSURE)) * illumE * Math.exp(-z / 14) * Math.min(1, (wPhys * 2 + 0.35) / width);
+    const p = bucket(Math.min(AMAX, alpha), width, illumTint);
+    if (!p) return;
+    p.moveTo(s1x, s1y); p.lineTo(s2x, s2y);
+  }
+  function prepareLights() {
+    nearLights = [];
+    for (const L of lights) {
+      const cz = L.z - cam.z;
+      if (cz < -2 || cz > ZF + 6) continue;
+      nearLights.push({ cx: L.x - cam.x, cy: L.y - cam.y, cz, I: L.I, warm: /^255,(1|2)/.test(L.col) });
+    }
+  }
+  function drawRain() {
+    prepareLights();
+    const rp = new Path2D();
+    for (const r of ripples) {
+      const z = r.z - cam.z;
+      if (z < 0.5) continue;
+      const sx = cx + f * (r.x - cam.x) / z, sy = cy + f * cam.y / z;
+      if (sx < -40 || sx > W + 40 || sy > H + 20) continue;
+      const rad = 0.004 + 0.23 * r.age, a = r.amp * Math.exp(-2.2 * r.age);
+      if (a < 0.08) continue;
+      const rx = f * rad / z, ry = rx * cam.y / z;
+      rp.moveTo(sx + rx, sy); rp.ellipse(sx, sy, rx, ry, 0, 0, TAU);
+    }
+    ctx.strokeStyle = 'rgba(175,190,215,0.22)'; ctx.lineWidth = 0.8;
+    ctx.stroke(rp);
+    for (const s of splashes) streak(s.x, s.y, s.z, s.vx, s.vy, s.vz - state.speed, s.D);
+    for (const d of drops) streak(d.x, d.y, d.z, d.vx, -d.v, -state.speed, d.D);
+    flushBuckets();
+  }
+
+  // ---------- the vinyl umbrella ----------
+  // A spherical cap (sphere radius 0.8 m, rim radius 0.52 m) held just above the head,
+  // tilted a little forward and into the wind. 8 ribs; the vinyl between them sags into
+  // scallops, so the rib tips are the lowest points of the rim — where water drains.
+  const U = { Rs: 0.8, R: 0.52, apex: [0.04, 0.37, 0.12], tilt: 0.16, roll: 0, ribs: 8, spin: 0.18 };
+  U.thR = Math.asin(U.R / U.Rs);
+  function rimTheta(phi) {
+    const s = Math.abs(Math.sin(U.ribs / 2 * (phi - U.spin) - Math.PI / 2));   // 1 at a rib, 0 between
+    return U.thR * (1 - 0.05 * Math.pow(1 - s, 1.5));
+  }
+  // local canopy point → camera coordinates (y up, z forward)
+  const CP = [0, 0, 0];
+  function canopyPoint(th, phi) {
+    const sT = Math.sin(th);
+    let x = U.Rs * sT * Math.sin(phi), y = -U.Rs * (1 - Math.cos(th)), z = U.Rs * sT * Math.cos(phi);
+    // pitch forward (tilt) and roll into the wind
+    const ct = Math.cos(U.tilt), st = Math.sin(U.tilt);
+    let y2 = y * ct - z * st, z2 = y * st + z * ct;
+    const cr = Math.cos(U.roll), sr = Math.sin(U.roll);
+    const x3 = x * cr - y2 * sr, y3 = x * sr + y2 * cr;
+    CP[0] = U.apex[0] + x3; CP[1] = U.apex[1] + y3; CP[2] = U.apex[2] + z2;
+    return CP;
+  }
+  // is a camera-relative point inside the dry shadow under the canopy?
+  function underUmbrella(x, y, z) {
+    let lx = x - U.apex[0], ly = y - U.apex[1], lz = z - U.apex[2];
+    const cr = Math.cos(-U.roll), sr = Math.sin(-U.roll);
+    const x1 = lx * cr - ly * sr, y1 = lx * sr + ly * cr;
+    const ct = Math.cos(-U.tilt), st = Math.sin(-U.tilt);
+    const y2 = y1 * ct - lz * st, z2 = y1 * st + lz * ct;
+    const r = Math.hypot(x1, z2);
+    if (r > U.R) return false;
+    const ys = -(U.Rs - Math.sqrt(U.Rs * U.Rs - r * r));
+    return y2 < ys && y2 > ys - 2.2;
+  }
+
+  // drops beaded on the canopy (sampled: each stands for many tiny ones)
+  const cdrops = [];
+  const HYST = 0.3;                          // PVC film: contact-angle hysteresis
+  const A_C = Math.sqrt(3 * SIGMA * HYST / (Math.PI * RHO * G)) * 1000;   // mm
+  const tips = Array.from({ length: U.ribs }, (_, k) => ({ phi0: (k + 0.5) * TAU / U.ribs - Math.PI, phi: 0, V: 0, stream: 0 }));
+  const TIP_DRIP_V = 0.6 * 2 * Math.PI * 0.004 * SIGMA / (RHO * G);   // Tate's law, 4 mm tip
+  const rimDrops = [];
+  let impactsVis = [];
+
+  function canopyHit(d) {
+    // visible splash flash on the vinyl, and sometimes a bead that stays
+    if (impactsVis.length < 60 && Math.random() < 0.5) {
+      const p = umbrellaLocal(d.x, d.y, d.z);
+      if (p) impactsVis.push({ th: p[0], phi: p[1], age: 0, D: d.D });
+    }
+  }
+  function umbrellaLocal(x, y, z) {
+    let lx = x - U.apex[0], ly = y - U.apex[1], lz = z - U.apex[2];
+    const cr = Math.cos(-U.roll), sr = Math.sin(-U.roll);
+    const x1 = lx * cr - ly * sr, y1 = lx * sr + ly * cr;
+    const ct = Math.cos(-U.tilt), st = Math.sin(-U.tilt);
+    const z2 = y1 * st + lz * ct;
+    const r = Math.hypot(x1, z2);
+    if (r > U.R) return null;
+    return [Math.asin(r / U.Rs), Math.atan2(x1, z2)];
+  }
+
+  function makeCDrop(th, phi, V) {
+    const d = { th, phi, V, a: 0, moving: false, speed: 0, pin: 0.8 + Math.random() * 0.45, dead: false };
+    d.a = Math.cbrt(1.5 * V / Math.PI);
+    return d;
+  }
+  let nextCanopyHit = 0;
+  function seedCanopy() {
+    for (let i = 0; i < 220; i++) {
+      const phi = (Math.random() - 0.5) * 2.6, th = Math.acos(1 - Math.random() * (1 - Math.cos(U.thR)));
+      const D = sampleD(state.rateNow) * (0.6 + Math.random() * 0.8);
+      cdrops.push(makeCDrop(Math.min(th, rimTheta(phi) - 0.01), phi, Math.PI / 6 * D ** 3));
+    }
+  }
+  function updateCanopy(dt) {
+    U.roll += (clamp(-state.wind * 0.025, -0.3, 0.3) - U.roll) * Math.min(1, dt * 2);
+    const spin = 0.18 + 0.12 * noise1(time * 0.07 + 900);    // the hand slowly turns the shaft
+    for (const d of cdrops) d.phi += spin - U.spin;             // beads turn with the fabric
+    U.spin = spin;
+    for (const t of tips) t.phi = t.phi0 + U.spin;
+    // new beads: Poisson arrivals over the visible front half of the canopy
+    const lambda = 9 * Math.pow(state.rateNow, 0.75);
+    nextCanopyHit -= dt;
+    while (nextCanopyHit <= 0) {
+      if (cdrops.length < 500 * quality) {
+        const th = Math.acos(1 - Math.random() * (1 - Math.cos(U.thR)));   // uniform over the cap
+        const phi = (Math.random() - 0.5) * 2.6;
+        const D = sampleD(state.rateNow);
+        cdrops.push(makeCDrop(Math.min(th, rimTheta(phi) - 0.01), phi, Math.PI / 6 * D ** 3 * (0.8 + Math.random())));
+      }
+      nextCanopyHit += -Math.log(1 - Math.random()) / lambda;
+    }
+    // continuous inflow to the rib tips from all the rain on each panel
+    const Qtip = Math.PI * U.R * U.R * state.rateNow / 3.6e6 / U.ribs;   // m³/s
+    for (const t of tips) t.V += Qtip * dt;
+
+    const ct = Math.cos(U.tilt), st = Math.sin(U.tilt), cr = Math.cos(U.roll), sr = Math.sin(U.roll);
+    const Uw = 0.3 * state.wind;
+    for (const d of cdrops) {
+      // gravity along the curved surface: project g onto the local tangents e_θ, e_φ
+      const sT = Math.sin(d.th), cT = Math.cos(d.th), sP = Math.sin(d.phi), cP = Math.cos(d.phi);
+      const rot = (x, y, z) => { const y2 = y * ct - z * st; return [x * cr - y2 * sr, x * sr + y2 * cr]; };  // (x', y') after tilt & roll
+      const [, eThY] = rot(cT * sP, -sT, cT * cP);
+      const [eThX] = rot(cT * sP, -sT, cT * cP);
+      const [ePhX, ePhY] = rot(cP, 0, -sP);
+      const gTh = -eThY, gPh = -ePhY;                      // g = (0, −1, 0)
+      const am = d.a * 1e-3;
+      const Fpin = 2 * am * SIGMA * HYST * d.pin * (d.moving ? 0.75 : 1);
+      const mg = RHO * (2 / 3) * Math.PI * am ** 3 * G;
+      const Fw = 0.5 * 1.2 * Uw * Math.abs(Uw) * Math.PI * am * am;
+      const Fth = mg * gTh + Fw * eThX, Fph = mg * gPh + Fw * ePhX;
+      const Fm = Math.hypot(Fth, Fph);
+      if (Fm > Fpin) {
+        d.moving = true;
+        const target = Math.min(0.25, 0.003 + SIGMA * HYST / (MU * 60) * (Fm / Fpin - 1));
+        d.speed += (target - d.speed) * Math.min(1, dt / 0.06);
+        d.th += d.speed * dt * Fth / Fm / U.Rs;
+        d.phi += d.speed * dt * Fph / Fm / (U.Rs * Math.max(0.05, sT));
+        d.V *= 1 - 0.02 * dt;                               // sheds a thin film as it runs
+        d.a = Math.cbrt(1.5 * d.V / Math.PI);
+      } else { d.moving = false; d.speed = 0; }
+      if (d.th < 0.02) d.th = 0.02;
+      if (d.th >= rimTheta(d.phi)) {
+        // reached the rim: runs along it to the nearest rib tip
+        let best = tips[0], bd = 9;
+        for (const t of tips) { const dd = Math.abs(Math.atan2(Math.sin(d.phi - t.phi), Math.cos(d.phi - t.phi))); if (dd < bd) { bd = dd; best = t; } }
+        best.V += d.V * 1e-9;
+        d.dead = true;
+      }
+    }
+    // merge touching beads (volume conserved)
+    for (let i = 0; i < cdrops.length; i++) {
+      const a = cdrops[i];
+      if (a.dead || !a.moving) continue;
+      for (let j = 0; j < cdrops.length; j++) {
+        if (i === j) continue;
+        const b = cdrops[j];
+        if (b.dead) continue;
+        const ds = U.Rs * Math.hypot(a.th - b.th, (a.phi - b.phi) * Math.sin(a.th)) * 1000;   // mm
+        if (ds < (a.a + b.a) * 0.8) {
+          a.V += b.V; a.a = Math.cbrt(1.5 * a.V / Math.PI); b.dead = true;
+        }
+      }
+    }
+    for (let i = cdrops.length - 1; i >= 0; i--) if (cdrops[i].dead) cdrops.splice(i, 1);
+
+    // rib tips: a drop leaves when its weight beats surface tension (Tate). At high inflow
+    // the dripping becomes a continuous thread that breaks up into drops (Plateau–Rayleigh).
+    for (const t of tips) {
+      const rate = Qtip / TIP_DRIP_V;
+      t.stream += ((rate > 9 ? 1 : 0) - t.stream) * Math.min(1, dt * 2);
+      while (t.V >= TIP_DRIP_V) {
+        t.V -= TIP_DRIP_V;
+        const p = canopyPoint(rimTheta(t.phi), t.phi);
+        if (p[2] > 0.05) rimDrops.push({ x: p[0], y: p[1], z: p[2], vy: 0, vx: 0, D: Math.cbrt(6 * TIP_DRIP_V / Math.PI) * 1000, t });
+        if (audio) audio.footDrip(Math.sqrt(2 * (p[1] + cam.y) / G), clamp(p[0] * 2, -1, 1));
+      }
+    }
+    for (let i = rimDrops.length - 1; i >= 0; i--) {
+      const d = rimDrops[i];
+      d.vy -= G * dt; d.y += d.vy * dt; d.z -= state.speed * dt;
+      d.x += (state.wind - d.vx) * dt * 0.3;
+      if (d.y < -cam.y || d.z < 0.08) rimDrops.splice(i, 1);
+    }
+    for (let i = impactsVis.length - 1; i >= 0; i--) { impactsVis[i].age += dt; if (impactsVis[i].age > 0.08) impactsVis.splice(i, 1); }
+  }
+
+  // screen snapshot used by the beads as lenses (they show the scene upside down)
+  let snap = null, snapCtx = null;
+  function drawUmbrella() {
+    // 1. the vinyl: slightly milky, scatters a little light (reduced contrast through it)
+    const rim = [];
+    for (let i = 0; i <= 64; i++) {
+      const phi = -Math.PI / 2 + Math.PI * i / 64;
+      const p = canopyPoint(rimTheta(phi), phi);
+      if (p[2] < 0.03) continue;
+      rim.push([cx + f * p[0] / p[2], cy - f * p[1] / p[2], p[2]]);
+    }
+    if (rim.length < 2) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(-50, -50);
+    ctx.lineTo(-50, rim[0][1]);
+    for (const [x, y] of rim) ctx.lineTo(x, y);
+    ctx.lineTo(W + 50, rim[rim.length - 1][1]);
+    ctx.lineTo(W + 50, -50);
+    ctx.closePath();
+    // Fresnel: the film reflects more at grazing angles, so it looks milkier toward the rim
+    const rimTop = Math.min(...rim.map(r => r[1]));
+    const fg = ctx.createLinearGradient(0, 0, 0, Math.max(...rim.map(r => r[1])));
+    fg.addColorStop(0, 'rgba(205,215,230,0.05)');
+    fg.addColorStop(Math.max(0.05, rimTop / H), 'rgba(205,215,230,0.08)');
+    fg.addColorStop(1, 'rgba(215,222,235,0.16)');
+    ctx.fillStyle = fg;
+    ctx.fill();
+    ctx.clip();
+    // light from the street lamps and shops glowing in the film
+    for (const L of nearLights) {
+      if (L.cz < 0.5 || L.cz > 20) continue;
+      const sx = cx + f * L.cx / L.cz, sy = cy - f * L.cy / L.cz;
+      const r = 90 + 400 / L.cz;
+      const gr = ctx.createRadialGradient(sx, sy, 0, sx, sy, r);
+      gr.addColorStop(0, `rgba(230,230,240,${Math.min(0.12, L.I / L.cz / 30).toFixed(3)})`); gr.addColorStop(1, 'rgba(230,230,240,0)');
+      ctx.fillStyle = gr;
+      ctx.fillRect(sx - r, sy - r, r * 2, r * 2);
+    }
+    // 2. beads on the vinyl — out of focus (we look at the street), each a tiny lens
+    const coc = (z) => f * APERTURE * Math.abs(1 / z - 1 / FOCUS);
+    for (const d of cdrops) {
+      const p = canopyPoint(d.th, d.phi);
+      if (p[2] < 0.05) continue;
+      const sx = cx + f * p[0] / p[2], sy = cy - f * p[1] / p[2];
+      if (sx < -20 || sx > W + 20 || sy < -20 || sy > H) continue;
+      const r = f * d.a * 1e-3 / p[2], b = coc(p[2]);
+      const R = r + b * 0.5;
+      const gr = ctx.createRadialGradient(sx, sy - r * 0.3, 0, sx, sy, R);
+      gr.addColorStop(0, `rgba(240,244,255,${(0.6 / (1 + b * 0.1)).toFixed(3)})`);
+      gr.addColorStop(0.45, `rgba(170,185,210,${(0.28 / (1 + b * 0.1)).toFixed(3)})`);
+      gr.addColorStop(0.85, `rgba(10,12,18,${(0.25 / (1 + b * 0.1)).toFixed(3)})`);
+      gr.addColorStop(1, 'rgba(10,12,18,0)');
+      ctx.fillStyle = gr;
+      ctx.beginPath(); ctx.arc(sx, sy, R, 0, TAU); ctx.fill();
+    }
+    // splashes on the film: tiny bright crowns, gone in a few frames
+    ctx.fillStyle = 'rgba(230,236,250,0.35)';
+    for (const s of impactsVis) {
+      const p = canopyPoint(s.th, s.phi);
+      if (p[2] < 0.05) continue;
+      const sx = cx + f * p[0] / p[2], sy = cy - f * p[1] / p[2];
+      const r = (2 + s.D) * (1 + s.age * 30) * 0.6;
+      ctx.globalAlpha = 1 - s.age / 0.08;
+      ctx.beginPath(); ctx.arc(sx, sy, r, 0, TAU); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // 3. ribs: meridians from the rib tips up toward the crown (thin steel, out of focus)
+    ctx.lineCap = 'round';
+    for (const t of tips) {
+      if (Math.abs(Math.atan2(Math.sin(t.phi), Math.cos(t.phi))) > Math.PI / 2) continue;
+      ctx.beginPath();
+      let started = false, zt = 1;
+      for (let i = 0; i <= 20; i++) {
+        const th = rimTheta(t.phi) * (1 - i / 20);
+        const p = canopyPoint(th, t.phi);
+        if (p[2] < 0.04) break;
+        const sx = cx + f * p[0] / p[2], sy = cy - f * p[1] / p[2];
+        if (!started) { ctx.moveTo(sx, sy); started = true; zt = p[2]; } else ctx.lineTo(sx, sy);
+      }
+      // thin steel: a dark core with a faint sheen from the street lights below
+      ctx.strokeStyle = 'rgba(150,158,172,0.22)';
+      ctx.lineWidth = f * 0.004 / zt + coc(zt) * 0.9;
+      ctx.stroke();
+      ctx.strokeStyle = 'rgba(12,14,18,0.6)';
+      ctx.lineWidth = f * 0.0025 / zt + coc(zt) * 0.3;
+      ctx.stroke();
+    }
+    // 4. the rim: the film seen edge-on catches light; black tips at the rib ends
+    ctx.beginPath();
+    rim.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+    ctx.strokeStyle = 'rgba(220,228,240,0.28)';
+    ctx.lineWidth = 2.2;
+    ctx.stroke();
+    for (const t of tips) {
+      const p = canopyPoint(rimTheta(t.phi), t.phi);
+      if (p[2] < 0.05) continue;
+      const sx = cx + f * p[0] / p[2], sy = cy - f * p[1] / p[2];
+      ctx.fillStyle = 'rgba(15,15,18,0.85)';
+      ctx.beginPath(); ctx.arc(sx, sy + 2, Math.max(2, f * 0.005 / p[2]) + coc(p[2]) * 0.3, 0, TAU); ctx.fill();
+      // streaming tips: a continuous water thread before it breaks into drops
+      if (t.stream > 0.05) {
+        const Lb = 0.12 + 0.2 * t.stream;
+        const q = [p[0], p[1] - Lb, p[2]];
+        ctx.strokeStyle = `rgba(210,220,240,${(0.25 * t.stream).toFixed(3)})`;
+        ctx.lineWidth = 1.5 + coc(p[2]) * 0.4;
+        ctx.beginPath(); ctx.moveTo(sx, sy + 2); ctx.lineTo(cx + f * q[0] / q[2], cy - f * q[1] / q[2]); ctx.stroke();
+      }
+    }
+    // 5. drops falling from the rib tips right in front of our face: big, blurred streaks
+    for (const d of rimDrops) {
+      if (d.z < 0.08) continue;
+      const sx = cx + f * d.x / d.z, sy = cy - f * d.y / d.z;
+      const sy2 = cy - f * (d.y - d.vy * EXPOSURE) / d.z;
+      const w = f * d.D * 1e-3 / d.z, b = coc(d.z);
+      ctx.strokeStyle = `rgba(215,225,245,${(0.3 / (1 + b * 0.25)).toFixed(3)})`;
+      ctx.lineWidth = w + b;
+      ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(sx, Math.min(sy - 1, sy2)); ctx.stroke();
+    }
+    // 6. the shaft, held in the right hand
+    const top = [U.apex[0], U.apex[1], U.apex[2]], hand = [0.13, -0.32, 0.24];
+    const pa = [cx + f * top[0] / Math.max(0.05, top[2]), cy - f * top[1] / Math.max(0.05, top[2])];
+    const pb = [cx + f * hand[0] / hand[2], cy - f * hand[1] / hand[2]];
+    ctx.strokeStyle = 'rgba(225,228,235,0.18)';
+    ctx.lineWidth = f * 0.012 / 0.2 + coc(0.2);
+    ctx.beginPath(); ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]); ctx.stroke();
+  }
+
+  // ---------- audio ----------
+  let audio = null;
+  function createAudio() {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    const ac = new AC(), sr = ac.sampleRate, rnd = Math.random;
+    const filter = (type, freq, Q = 0.7, gain = 0) => { const b = ac.createBiquadFilter(); b.type = type; b.frequency.value = freq; b.Q.value = Q; b.gain.value = gain; return b; };
+    const gainNode = v => { const g = ac.createGain(); g.gain.value = v; return g; };
+    function noiseBuf(sec, pink) {
+      const buf = ac.createBuffer(1, sr * sec, sr), d = buf.getChannelData(0);
+      let b0 = 0, b1 = 0, b2 = 0;
+      for (let i = 0; i < d.length; i++) {
+        const w = rnd() * 2 - 1;
+        if (!pink) { d[i] = w * 0.5; continue; }
+        b0 = 0.99765 * b0 + w * 0.0990460; b1 = 0.96300 * b1 + w * 0.2965164; b2 = 0.57000 * b2 + w * 1.0526913;
+        d[i] = (b0 + b1 + b2 + w * 0.1848) * 0.18;
+      }
+      return buf;
+    }
+    const white = noiseBuf(2, false), pink = noiseBuf(4, true);
+    const loop = buf => { const s = ac.createBufferSource(); s.buffer = buf; s.loop = true; s.start(0, rnd() * buf.duration); return s; };
+    const panner = (pan, dest) => {
+      if (!ac.createStereoPanner) return dest;
+      const p = ac.createStereoPanner(); p.pan.value = clamp(pan, -1, 1); p.connect(dest); return p;
+    };
+
+    const comp = ac.createDynamicsCompressor();
+    comp.threshold.value = -12; comp.ratio.value = 3;
+    const master = gainNode(state.volume);
+    master.connect(comp).connect(ac.destination);
+    // the street: open air with facade reflections (street canyon reverb)
+    const street = gainNode(1);
+    street.connect(master);
+    const ir = ac.createBuffer(2, Math.floor(sr * 2), sr);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = ir.getChannelData(ch), k = 6.91 / (1.2 * sr);
+      for (let i = 0; i < d.length; i++) d[i] = (rnd() * 2 - 1) * Math.exp(-k * i) * 0.35 * Math.min(1, i / (0.02 * sr));
+      for (const [ms, a] of [[13, 0.45], [58, 0.5], [71, 0.35], [120, 0.25], [150, 0.18]]) {
+        const i = Math.floor((ms + (ch ? 2.5 : 0)) * sr / 1000); if (i < d.length) d[i] += a;
+      }
+    }
+    const verb = ac.createConvolver(); verb.buffer = ir;
+    const verbSend = gainNode(0.25);
+    street.connect(verbSend).connect(verb).connect(master);
+
+    // equal-power granular playback: rain never repeats
+    const XF = 0.45, GRAIN = 1.8, CURVE = 32;
+    const fadeIn = new Float32Array(CURVE).map((_, i) => Math.sin(i / (CURVE - 1) * Math.PI / 2));
+    const fadeOut = new Float32Array(CURVE).map((_, i) => Math.cos(i / (CURVE - 1) * Math.PI / 2));
+    function texturePlayer(buf, dest) {
+      let next = ac.currentTime + 0.05;
+      return function schedule() {
+        if (next < ac.currentTime) next = ac.currentTime + 0.05;
+        while (next < ac.currentTime + 0.6) {
+          const src = ac.createBufferSource(), g = ac.createGain();
+          src.buffer = buf; g.gain.value = 0;
+          g.gain.setValueCurveAtTime(fadeIn, next, XF);
+          g.gain.setValueCurveAtTime(fadeOut, next + GRAIN - XF, XF);
+          src.connect(g).connect(dest);
+          src.start(next, rnd() * (buf.duration - GRAIN), GRAIN);
+          next += GRAIN - XF;
+        }
+      };
+    }
+    function normalise(L, R, target) {
+      let ss = 0; for (let i = 0; i < L.length; i++) ss += L[i] * L[i] + R[i] * R[i];
+      const n = target / (Math.sqrt(ss / (2 * L.length)) || 1);
+      for (let i = 0; i < L.length; i++) { L[i] = Math.tanh(L[i] * n); R[i] = Math.tanh(R[i] * n); }
+    }
+
+    // --- rain on the street all around (impacts, air absorption, Minnaert bubbles)
+    function streetRain(lambda, sec) {
+      const len = Math.floor(sr * sec), buf = ac.createBuffer(2, len, sr);
+      const L = buf.getChannelData(0), R = buf.getChannelData(1);
+      for (let e = 0, n = lambda * sec; e < n; e++) {
+        const t0 = Math.floor(rnd() * len), r = Math.sqrt(4 + rnd() * (1600 - 4));
+        const D = 0.5 - Math.log(1 - rnd()) * 0.6, amp = Math.pow(D, 1.5) / r;
+        const fcut = clamp(16000 * 12 / r, 1200, 16000), a1 = Math.exp(-TAU * fcut / sr);
+        const az = (rnd() - 0.5) * Math.PI * 2, gl = Math.cos((Math.sin(az) + 1) * Math.PI / 4), gr = Math.sin((Math.sin(az) + 1) * Math.PI / 4);
+        let y = 0;
+        if (rnd() < 0.15) {
+          const f0 = D > 0.8 && D < 1.2 && rnd() < 0.6 ? 12500 + rnd() * 3500 : 3260 / (0.5 + rnd());
+          const tau = 1 / (Math.PI * f0 * 0.045), m = Math.floor(tau * 5 * sr);
+          for (let k = 0; k < m; k++) { const t = k / sr; y = y * a1 + Math.sin(TAU * f0 * t) * Math.exp(-t / tau) * amp * 0.6 * (1 - a1); const i = (t0 + k) % len; L[i] += y * gl; R[i] += y * gr; }
+        } else {
+          const m = Math.floor((0.0015 + 0.0015 * D) * sr), tau = m / 4;
+          for (let k = 0; k < m; k++) { y = y * a1 + (rnd() * 2 - 1) * Math.exp(-k / tau) * amp * (1 - a1); const i = (t0 + k) % len; L[i] += y * gl; R[i] += y * gr; }
+        }
+      }
+      normalise(L, R, 0.12);
+      return buf;
+    }
+
+    // --- rain drumming on the umbrella right above the head.
+    // Each drop is a tiny hammer: a bright "tick" from the impact itself plus the vinyl panel
+    // ringing as a tensioned membrane. Panel modes follow the Bessel-zero ratios of a
+    // circular membrane (1, 1.59, 2.14, 2.30, 2.65, 2.92, 3.16, 3.50) with f₀₁ = 2.405/(2πa)·√(T/ρₛ)
+    // ≈ 50–110 Hz for a 0.2 m panel of 0.1 kg/m² film at ~50 N/m, heavily damped by the air.
+    // Loudness ∝ momentum of the drop (∝ D³·v). Stereo follows where on the canopy it hit.
+    const MODES = [1, 1.594, 2.136, 2.296, 2.653, 2.918, 3.156, 3.501];
+    const templates = [];
+    for (let k = 0; k < 24; k++) {
+      const f01 = 50 + rnd() * 60, len = Math.floor(0.14 * sr), b = new Float32Array(len);
+      for (let i = 0; i < Math.floor(0.0009 * sr); i++) b[i] += (rnd() * 2 - 1) * (1 - i / (0.0009 * sr)) * 0.9;   // tick
+      let hp = 0, prev = 0;
+      for (let i = 0; i < len; i++) { const v = b[i]; hp = 0.6 * (hp + v - prev); prev = v; b[i] = hp; }        // brighten the tick
+      MODES.forEach((m, j) => {
+        const fr = f01 * m * (1 + (rnd() - 0.5) * 0.04), tau = 0.045 / (1 + 0.35 * j), a = 0.28 / (1 + j * 0.5) * (0.6 + rnd() * 0.8);
+        for (let i = 0; i < len; i++) b[i] += a * Math.sin(TAU * fr * i / sr) * Math.exp(-i / (tau * sr));
+      });
+      // the film also buzzes in the 600–2000 Hz range (many high modes)
+      let y = 0; const a1 = Math.exp(-TAU * 1400 / sr);
+      for (let i = 0; i < Math.floor(0.02 * sr); i++) { y = y * a1 + (rnd() * 2 - 1) * (1 - a1); b[i] += y * 0.8 * Math.exp(-i / (0.006 * sr)); }
+      templates.push(b);
+    }
+    function umbrellaRain(lambda, sec) {
+      const len = Math.floor(sr * sec), buf = ac.createBuffer(2, len, sr);
+      const L = buf.getChannelData(0), R = buf.getChannelData(1);
+      for (let e = 0, n = lambda * sec; e < n; e++) {
+        const t0 = Math.floor(rnd() * len);
+        const D = 0.5 - Math.log(1 - rnd()) * 0.7;
+        const amp = Math.min(3, D * D * D * termVel(D) / 20);
+        const tpl = templates[(rnd() * templates.length) | 0];
+        const pan = (rnd() - 0.5) * 1.6, gl = Math.cos((pan + 1) * Math.PI / 4), gr = Math.sin((pan + 1) * Math.PI / 4);
+        const m = D < 1 ? tpl.length >> 2 : tpl.length;
+        for (let k = 0; k < m; k++) { const i = (t0 + k) % len, v = tpl[k] * amp; L[i] += v * gl; R[i] += v * gr; }
+      }
+      normalise(L, R, 0.14);
+      return buf;
+    }
+
+    const streetLight = gainNode(0), streetHeavy = gainNode(0), umbLight = gainNode(0), umbHeavy = gainNode(0);
+    streetLight.connect(street); streetHeavy.connect(street);
+    // the umbrella is 30 cm above the ears: heard directly, with a hint of the street reverb
+    const umb = gainNode(1);
+    umb.connect(master); umb.connect(gainNode(0.08)).connect(verb);
+    umbLight.connect(umb); umbHeavy.connect(umb);
+    const players = [
+      texturePlayer(streetRain(700, 5), streetLight), texturePlayer(streetRain(6000, 4), streetHeavy),
+      texturePlayer(umbrellaRain(90, 5), umbLight), texturePlayer(umbrellaRain(900, 4), umbHeavy),
+    ];
+    const roarGain = gainNode(0);
+    loop(pink).connect(filter('lowpass', 500)).connect(roarGain).connect(street);
+    const windGain = gainNode(0), windBP = filter('bandpass', 200, 0.6);
+    loop(pink).connect(windBP).connect(windGain).connect(street);
+
+    // footsteps on wet paving: heel strike (a dull knock), then the sole peeling off the
+    // wet stone (a short wet "slap" / suction)
+    function step(side) {
+      const t = ac.currentTime;
+      const out = panner(side * 0.18, master);
+      const k = ac.createBufferSource(), kg = ac.createGain();
+      k.buffer = white;
+      kg.gain.setValueAtTime(0.35, t); kg.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
+      k.connect(filter('lowpass', 900)).connect(kg).connect(out);
+      k.start(t, rnd(), 0.08);
+      const s = ac.createBufferSource(), sg = ac.createGain();
+      s.buffer = white;
+      sg.gain.setValueAtTime(0.0001, t + 0.03); sg.gain.exponentialRampToValueAtTime(0.12, t + 0.045); sg.gain.exponentialRampToValueAtTime(0.0001, t + 0.13);
+      s.connect(filter('bandpass', 2500, 0.9)).connect(sg).connect(out);
+      s.start(t, rnd(), 0.2);
+      k.connect(gainNode(0.3)).connect(verbSend);
+    }
+    // a drop from a rib tip landing on the wet pavement next to our feet
+    function footDrip(delay, pan) {
+      const t = ac.currentTime + delay;
+      const out = panner(pan, master);
+      const f0 = 3260 / (0.9 + rnd() * 1.2);
+      const o = ac.createOscillator(), g = ac.createGain();
+      o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f0 * 1.3, t + 0.05);
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.06, t + 0.003); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.07);
+      o.connect(g).connect(out); o.start(t); o.stop(t + 0.1);
+      const s = ac.createBufferSource(), sg = ac.createGain();
+      s.buffer = white; sg.gain.setValueAtTime(0.18, t); sg.gain.exponentialRampToValueAtTime(0.0001, t + 0.025);
+      s.connect(filter('bandpass', 1800, 0.8)).connect(sg).connect(out); s.start(t, rnd(), 0.05);
+    }
+
+    function update() {
+      players.forEach(p => p());
+      const now = ac.currentTime, R = state.rateNow, u = Math.abs(state.wind);
+      master.gain.setTargetAtTime(state.volume, now, 0.1);
+      const x = clamp(Math.log(R / 0.3) / Math.log(100 / 0.3), 0, 1);
+      const lvl = 0.2 + 0.8 * Math.sqrt(Math.min(1, R / 100));
+      streetLight.gain.setTargetAtTime(Math.cos(x * Math.PI / 2) * lvl * 1.2 * 0.7, now, 0.4);
+      streetHeavy.gain.setTargetAtTime(Math.sin(x * Math.PI / 2) * lvl * 0.7, now, 0.4);
+      umbLight.gain.setTargetAtTime(Math.cos(x * Math.PI / 2) * lvl * 1.3, now, 0.4);
+      umbHeavy.gain.setTargetAtTime(Math.sin(x * Math.PI / 2) * lvl, now, 0.4);
+      roarGain.gain.setTargetAtTime(0.1 * Math.sqrt(Math.min(1, R / 100)), now, 0.5);
+      windGain.gain.setTargetAtTime(Math.min(1.3, 0.9 * (u / 12) ** 3), now, 0.15);
+      windBP.frequency.setTargetAtTime(90 + u * 22, now, 0.15);
+    }
+    update();
+    return { ac, master, update, step, footDrip };
+  }
+
+  // ---------- loop ----------
+  let last = performance.now(), time = 0, audioT = 0, statsT = 0, stepSide = 1, lastStepPhase = 0;
+  let quality = 1, ftAvg = 16.7, ftBase = 1000, qualityT = 0;
+  function adaptQuality(ms) {
+    if (ms <= 0 || ms > 250) return;
+    ftAvg += (ms - ftAvg) * 0.08;
+    ftBase = Math.min(17.5, ftBase * 1.0005, ftAvg);
+    qualityT += ms / 1000;
+    if (qualityT < 1) return;
+    qualityT = 0;
+    if (ftAvg > ftBase * 1.22 && quality > 0.35) quality *= 0.85;
+    else if (ftAvg < ftBase * 1.08 && quality < 1) quality = Math.min(1, quality * 1.04);
+  }
+  function gustField(x, t) {
+    const X = x - state.wind0 * t;
+    return 0.6 * noise1(X / 28 + t * 0.05) + 0.3 * noise1(X / 9 + 100 + t * 0.15) + 0.15 * noise1(X / 3.5 + 200 + t * 0.4);
+  }
+
+  function frame(now) {
+    adaptQuality(now - last);
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now; time += dt;
+    state.wind = state.wind0 + (0.35 * Math.abs(state.wind0) + 0.5) * gustField(0, time);
+    state.rateNow = state.rate * Math.exp(0.28 * pink1(time * 0.05, 500));
+
+    camYPrev = cam.y;
+    updateCamera(dt);
+    // footstep at each heel strike (lowest point of the gait)
+    const stepPhase = Math.floor(cam.phase / TAU);
+    if (stepPhase !== lastStepPhase) {
+      lastStepPhase = stepPhase; stepSide = -stepSide;
+      if (audio && state.speed > 0.4) audio.step(stepSide);
+    }
+    updateRain(dt);
+    updateCanopy(dt);
+    if (audio) { audioT += dt; if (audioT > 0.1) { audio.update(); audioT = 0; } }
+
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    drawSky();
+    drawGround();
+    drawCity();
+    drawReflections();
+    // rain scatters light: the street fades into haze
+    ctx.fillStyle = `rgba(55,60,75,${(0.25 * (1 - Math.exp(-state.rateNow / 40))).toFixed(3)})`;
+    ctx.fillRect(0, 0, W, H);
+    drawRain();
+    drawUmbrella();
+    ctx.drawImage(vignette, 0, 0, W, H);
+
+    statsT += dt;
+    if (statsT > 0.25) { updateStats(); statsT = 0; }
+    requestAnimationFrame(frame);
+  }
+
+  let vignette;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    f = 0.62 * Math.hypot(W, H);
+    cx = W / 2; cy = H * 0.56;
+    vignette = mkCanvas(W, H);
+    const v = vignette.getContext('2d');
+    const gr = v.createRadialGradient(W / 2, H * 0.5, Math.min(W, H) * 0.35, W / 2, H * 0.5, Math.hypot(W, H) * 0.62);
+    gr.addColorStop(0, 'rgba(0,0,0,0)'); gr.addColorStop(1, 'rgba(0,0,0,0.42)');
+    v.fillStyle = gr; v.fillRect(0, 0, W, H);
+    drops.length = 0;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  const statsEl = document.getElementById('stats');
+  function updateStats() {
+    const R = state.rateNow, L = mpLambda(R), meanD = 0.5 + 1 / L;
+    const tipRate = Math.PI * U.R * U.R * R / 3.6e6 / U.ribs / TIP_DRIP_V;
+    statsEl.innerHTML =
+      `降水強度 ${R.toFixed(1)} mm/h（${rainClass(R)}）・風速 ${state.wind.toFixed(1)} m/s<br>` +
+      `平均雨滴径 ${meanD.toFixed(2)} mm・傘の骨の先から ${tipRate < 9 ? tipRate.toFixed(1) + ' 滴/秒' : '水が糸状に流れ落ちる'}<br>` +
+      `歩いた距離 ${cam.z.toFixed(0)} m`;
+  }
+  seedCanopy();
+  requestAnimationFrame(frame);
+  if (location.hash === '#debug') window.__umb = { state, cam, cdrops, tips, get audio() { return audio; } };
+
+  // ---------- UI ----------
+  const $ = id => document.getElementById(id);
+  function bindSlider(id, apply, fmt) {
+    const el = $(id), val = $(id + 'Val');
+    const sync = () => { apply(+el.value); val.textContent = fmt(); if (audio) audio.update(); };
+    el.addEventListener('input', sync); sync();
+    return el;
+  }
+  bindSlider('rate', v => state.rate = rateFromSlider(v), () => `${state.rate.toFixed(1)} mm/h`);
+  const windSlider = bindSlider('wind', v => state.wind0 = v / 10, () => `${state.wind0.toFixed(1)} m/s`);
+  bindSlider('volume', v => state.volume = v / 100, () => `${Math.round(state.volume * 100)}%`);
+  function setWind(v) {
+    state.wind0 = clamp(v, -15, 15);
+    windSlider.value = Math.round(state.wind0 * 10);
+    $('windVal').textContent = `${state.wind0.toFixed(1)} m/s`;
+  }
+  function setWalking(w) {
+    state.walking = w;
+    $('walkBtn').classList.toggle('on', w);
+    $('walkBtn').textContent = w ? '歩く' : '立ち止まる';
+  }
+  $('startBtn').addEventListener('click', () => {
+    audio = createAudio();
+    if (audio && audio.ac.state === 'suspended') audio.ac.resume();
+    $('start').remove();
+  });
+  $('toggle').addEventListener('click', () => $('panel').classList.toggle('hidden'));
+  $('walkBtn').addEventListener('click', () => setWalking(!state.walking));
+  $('windowBtn').addEventListener('click', () => { location.href = 'index.html'; });
+
+  let touchStart = null;
+  canvas.addEventListener('pointerdown', e => { touchStart = { x: e.clientX, wind: state.wind0, moved: false }; });
+  canvas.addEventListener('pointermove', e => {
+    if (!touchStart) return;
+    const dx = e.clientX - touchStart.x;
+    if (Math.abs(dx) > 10) touchStart.moved = true;
+    if (touchStart.moved) setWind(touchStart.wind + dx / (W * 0.6) * 15);
+  });
+  canvas.addEventListener('pointerup', () => { if (touchStart && !touchStart.moved) setWalking(!state.walking); touchStart = null; });
+  canvas.addEventListener('pointercancel', () => touchStart = null);
+  document.addEventListener('visibilitychange', () => {
+    if (!audio) return;
+    if (document.hidden) audio.ac.suspend(); else audio.ac.resume();
+  });
+})();
+</script>
+</body>
+</html>
