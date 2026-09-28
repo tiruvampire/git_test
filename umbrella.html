@@ -2084,6 +2084,7 @@
   }
 
   // ---------- loop ----------
+  let cellT = 1000, cellNext = 1090 + Math.random() * 90, cellDir = 1, showerNow = false;   // first cell after 1.5–3 min
   let last = performance.now(), time = 0, audioT = 0, statsT = 0, stepSide = 1, lastStepPhase = 0;
   let quality = 1, ftAvg = 16.7, ftBase = 1000, qualityT = 0;
   function adaptQuality(ms) {
@@ -2115,6 +2116,15 @@
     last = now; time += dt;
     state.wind = state.wind0 + (0.35 * Math.abs(state.wind0) + 0.5) * gustField(0, time);
     state.rateNow = state.rate * Math.exp(0.28 * pink1(time * 0.05, 500));
+    // A convective cell passes every few minutes: its gust front (cold outflow running ahead of
+    // the rain) arrives first, then the downpour, which eases off again
+    cellT += dt;
+    if (cellT > cellNext) { cellT = 0; cellNext = 120 + Math.random() * 180; cellDir = Math.random() < 0.5 ? -1 : 1; }
+    const bump = (t, c, w) => Math.exp(-(((t - c) / w) ** 2));
+    const gust = bump(cellT, 12, 6), burst = bump(cellT, 32, 14);
+    state.wind += cellDir * 5 * gust;
+    state.rateNow *= 1 + 1.6 * burst;
+    showerNow = burst > 0.35;
 
     camYPrev = cam.y;
     updateCamera(dt);
@@ -2290,7 +2300,7 @@
     statsEl.innerHTML =
       `降水強度 ${R.toFixed(1)} mm/h（${rainClass(R)}）・風速 ${state.wind.toFixed(1)} m/s<br>` +
       `平均雨滴径 ${meanD.toFixed(2)} mm・傘の骨の先から ${tipRate < 9 ? tipRate.toFixed(1) + ' 滴/秒' : '水が糸状に流れ落ちる'}<br>` +
-      `歩いた距離 ${cam.z.toFixed(0)} m`;
+      `歩いた距離 ${cam.z.toFixed(0)} m` + (showerNow ? '・にわか雨が通過中' : '');
     if (thunderInfo) {
       const hud = document.getElementById('hud');
       const el = (performance.now() - thunderInfo.t0) / 1000, eta = thunderInfo.rmin / SOUND_SPEED;
