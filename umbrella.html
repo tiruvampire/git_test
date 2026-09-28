@@ -431,12 +431,76 @@
     lights.push({ x: Xh, y: Hh - 0.2, z: L.z, col, I: 18, size: 2, refl: 0.3 });
   }
 
+  // ---------- traffic ----------
+  // Japan drives on the left: oncoming cars use the lane next to our sidewalk (x ≈ −3.1),
+  // cars going our way the far lane. Headlights are beams that light the rain ahead of them,
+  // tyres throw up spray, and their hiss is Doppler shifted, f' = f·c/(c − v_r).
+  const cars = [];
+  let nextCar = 2;
+  function spawnCar() {
+    const oncoming = Math.random() < 0.6, v = 8 + Math.random() * 6;
+    cars.push({ x: oncoming ? -3.1 : -6.7, z: oncoming ? cam.z + 170 : cam.z - 6, vz: oncoming ? -v : v, oncoming,
+      voice: audio ? audio.carVoice() : null });
+  }
+  function updateCars(dt) {
+    nextCar -= dt;
+    if (nextCar <= 0) { if (cars.length < 4) spawnCar(); nextCar = 4 + Math.random() * 11; }
+    for (let i = cars.length - 1; i >= 0; i--) {
+      const c = cars[i];
+      c.z += c.vz * dt;
+      const zr = c.z - cam.z;
+      if (zr < -10 || zr > 200) { if (c.voice) c.voice.stop(); cars.splice(i, 1); continue; }
+      if (zr > 0 && zr < 40 && splashes.length < 600 * quality && Math.random() < dt * 90 * Math.min(1, 0.3 + state.rateNow / 20)) {
+        const rear = zr - Math.sign(c.vz) * 1.3;
+        for (let k = 0; k < 2; k++) {
+          splashes.push({ x: c.x - cam.x + (Math.random() < 0.5 ? -0.8 : 0.8), y: -cam.y + 0.05, z: rear,
+            vx: (Math.random() - 0.5) * 2, vy: 0.6 + Math.random() * 2.2, vz: c.vz * (0.15 + Math.random() * 0.3), D: 0.3 + Math.random() * 0.8 });
+        }
+      }
+      if (c.voice) {
+        const dx = c.x - cam.x, r = Math.hypot(dx, cam.y, zr);
+        const vr = -zr * (c.vz - state.speed) / r;                // closing speed
+        c.voice.set(Math.min(1, 7.5 / r), SOUND_SPEED / (SOUND_SPEED - vr), dx / r * 1.5, r);
+      }
+    }
+  }
+  function drawCars() {
+    for (const c of cars) {
+      const zr = c.z - cam.z;
+      if (zr < 1) continue;
+      const P = (x, y) => { const p = proj(c.x + x, y, c.z); return [p.x, p.y]; };
+      const [x0, y0] = P(-0.9, 0.25), [x1, y1] = P(0.9, 0.95), [x2, y2] = P(-0.7, 1.45), [x3] = P(0.7, 1.45);
+      ctx.fillStyle = 'rgba(8,10,15,0.94)';
+      ctx.beginPath();
+      ctx.moveTo(x0, y0); ctx.lineTo(x0, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y2); ctx.lineTo(x1, y1); ctx.lineTo(x1, y0);
+      ctx.closePath(); ctx.fill();
+      const coc = f * APERTURE * Math.abs(1 / zr - 1 / FOCUS);
+      const col = c.oncoming ? '255,246,228' : '255,40,28';
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      for (const sx0 of [-0.72, 0.72]) {
+        const ly = c.oncoming ? 0.7 : 0.9;
+        const [sx, sy] = P(sx0, ly);
+        const r = f * (c.oncoming ? 1.4 : 0.45) / zr + coc * 1.5;
+        const a = (c.oncoming ? 0.95 : 0.8) / (1 + coc * 0.08);
+        const gr = ctx.createRadialGradient(sx, sy, 0, sx, sy, r);
+        gr.addColorStop(0, `rgba(${col},${a})`); gr.addColorStop(0.15, `rgba(${col},${a * 0.5})`); gr.addColorStop(1, `rgba(${col},0)`);
+        ctx.fillStyle = gr;
+        ctx.fillRect(sx - r, sy - r, r * 2, r * 2);
+        lights.push({ x: c.x + sx0, y: ly, z: c.z, col, I: c.oncoming ? 50 : 4, size: 0.5, refl: c.oncoming ? 0.4 : 0.35,
+          bz: c.oncoming ? -1 : 1, by: -0.08, white: c.oncoming });
+      }
+      ctx.restore();
+    }
+  }
+
   function drawCity() {
     lights = [];
     const bl = visibleBlocks();
-    // far side of the road first, then lamps, then our side (near → covers far)
+    // far side of the road first, then lamps and traffic, then our side (near → covers far)
     for (const blk of bl) drawBuildingSide(blk.left, SIDE_L, true, blk);
     for (const blk of bl) if (blk.lamp) drawLamp(blk.lamp);
+    drawCars();
     for (const blk of bl) {
       drawBuildingSide(blk.right, SIDE_R, false, blk);
       if (blk.vend) drawVending(blk.vend);
@@ -544,7 +608,8 @@
       const d2 = dx * dx + dy * dy + dz * dz, d = Math.sqrt(d2);
       const cos = -(dx * x + dy * y + dz * z) / (d * vl);
       const ph = (1 - HG_G * HG_G) / Math.pow(1 + HG_G * HG_G - 2 * HG_G * cos, 1.5);
-      const e = L.I * ph / (d2 + 0.6);
+      const beam = L.bz ? Math.pow(Math.max(0, (dz * L.bz + dy * L.by) / d), 6) : 1;
+      const e = L.I * ph * beam / (d2 + 0.6);
       if (L.warm) warm += e; else cool += e;
     }
     illumE = SKY_E + warm + cool;
@@ -569,7 +634,7 @@
     for (const L of lights) {
       const cz = L.z - cam.z;
       if (cz < -2 || cz > ZF + 6) continue;
-      nearLights.push({ cx: L.x - cam.x, cy: L.y - cam.y, cz, I: L.I, warm: /^255,(1|2)/.test(L.col) });
+      nearLights.push({ cx: L.x - cam.x, cy: L.y - cam.y, cz, I: L.I, warm: /^255,(1|2)/.test(L.col), bz: L.bz, by: L.by });
     }
   }
   function drawRain() {
@@ -1095,7 +1160,33 @@
       windBP.frequency.setTargetAtTime(90 + u * 22, now, 0.15);
     }
     update();
-    return { ac, master, update, step, footDrip };
+    // a passing car: tyre hiss on the wet road + rolling noise; the playback rate carries the
+    // Doppler shift (it scales the whole spectrum), a low-pass the air absorption with distance
+    function carVoice() {
+      const hiss = loop(white), roll = loop(pink);
+      const bp = filter('bandpass', 1600, 0.5), air = filter('lowpass', 8000), g = gainNode(0), g2 = gainNode(0);
+      const out = panner(0, street);
+      hiss.connect(bp).connect(air).connect(g).connect(out);
+      roll.connect(filter('lowpass', 160)).connect(g2).connect(out);
+      const pan = out.pan;
+      return {
+        set(amp, rate, p, r) {
+          const now = ac.currentTime;
+          hiss.playbackRate.setTargetAtTime(rate, now, 0.05);
+          roll.playbackRate.setTargetAtTime(rate, now, 0.05);
+          g.gain.setTargetAtTime(0.4 * amp, now, 0.05);
+          g2.gain.setTargetAtTime(0.5 * amp, now, 0.05);
+          air.frequency.setTargetAtTime(clamp(16000 * 15 / r, 900, 16000), now, 0.1);
+          if (pan) pan.setTargetAtTime(clamp(p, -1, 1), now, 0.05);
+        },
+        stop() {
+          const now = ac.currentTime;
+          g.gain.setTargetAtTime(0, now, 0.1); g2.gain.setTargetAtTime(0, now, 0.1);
+          hiss.stop(now + 0.6); roll.stop(now + 0.6);
+        },
+      };
+    }
+    return { ac, master, update, step, footDrip, carVoice };
   }
 
   // ---------- loop ----------
@@ -1133,6 +1224,7 @@
     }
     updateRain(dt);
     updateCanopy(dt);
+    updateCars(dt);
     if (audio) { audioT += dt; if (audioT > 0.1) { audio.update(); audioT = 0; } }
 
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
@@ -1180,7 +1272,7 @@
   }
   seedCanopy();
   requestAnimationFrame(frame);
-  if (location.hash === '#debug') window.__umb = { state, cam, cdrops, tips, get audio() { return audio; } };
+  if (location.hash === '#debug') window.__umb = { state, cam, cdrops, tips, cars, spawnCar, get audio() { return audio; } };
 
   // ---------- UI ----------
   const $ = id => document.getElementById(id);
