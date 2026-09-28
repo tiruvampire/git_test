@@ -1471,6 +1471,43 @@
     v.fillStyle = gr; v.fillRect(0, 0, W, H);
   }
 
+  // Splash mist: in heavy rain the impacts atomise into fine droplets that hang in a thin
+  // layer over the road and drift with the wind (a tileable texture at two depths)
+  const mistTex = (() => {
+    const c = mkCanvas(1024, 64), g = c.getContext('2d');
+    for (let i = 0; i < 110; i++) {
+      const x = Math.random() * 1024, y = 26 + Math.random() * 26, r = 20 + Math.random() * 60;
+      for (const dx of [-1024, 0, 1024]) {
+        g.save();
+        g.translate(x + dx, y); g.scale(1, 0.3);
+        const gr = g.createRadialGradient(0, 0, 0, 0, 0, r);
+        gr.addColorStop(0, 'rgba(200,210,230,0.14)'); gr.addColorStop(1, 'rgba(200,210,230,0)');
+        g.fillStyle = gr;
+        g.fillRect(-r, -r, r * 2, r * 2);
+        g.restore();
+      }
+    }
+    // densest just above the road, thinning out upward and toward the surface
+    g.globalCompositeOperation = 'destination-in';
+    const m = g.createLinearGradient(0, 0, 0, 64);
+    m.addColorStop(0, 'rgba(0,0,0,0)'); m.addColorStop(0.65, 'rgba(0,0,0,1)'); m.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = m; g.fillRect(0, 0, 1024, 64);
+    return c;
+  })();
+  function drawMist() {
+    const a = 0.6 * (1 - Math.exp(-state.rateNow / 35));
+    if (a < 0.03) return;
+    ctx.globalAlpha = a * 0.4;
+    for (const z of [5, 7.5, 11, 16, 24]) {
+      const h = f * 0.9 / z, gy = cy + f * HC / z;                 // ~0.9 m thick layer
+      const w = h * 16;                                            // texture aspect 16:1
+      let off = (-(time * state.wind * f / z) % w + w) % w;
+      const o2 = (z * 137) % w;                                    // decorrelate the layers
+      for (let x = -ox - off - o2; x < W + ox; x += w) ctx.drawImage(mistTex, x, gy - h * 0.8, w, h);
+    }
+    ctx.globalAlpha = 1;
+  }
+
   let renderScale = 1;
   function sizeCanvases() {
     DPR = Math.min(window.devicePixelRatio || 1, 2) * renderScale;
@@ -1615,6 +1652,7 @@
     hazeStyle = `rgba(55,60,75,${(0.28 * (1 - Math.exp(-state.rateNow / 40))).toFixed(3)})`;
     ctx.fillStyle = hazeStyle;
     ctx.fillRect(-ox, -oy, B, B);
+    drawMist();
     drawRain();
     ctx.restore();
 
