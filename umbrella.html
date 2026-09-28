@@ -206,7 +206,9 @@
       blk.right.push({
         z0: z, z1: z + len, h: 7 + r(30 + i) * 20,
         tone: 10 + r(40 + i) * 10 | 0,
-        shop: shopLit ? { warm: r(50 + i) < 0.65, sign: SIGNS[(r(60 + i) * SIGNS.length) | 0], col: SIGN_COL[(r(70 + i) * SIGN_COL.length) | 0] } : null,
+        shop: !shopLit ? null : len > 6 && r(80 + i) < 0.18
+          ? { konbini: true, warm: false, sign: '24H', col: [245, 246, 250] }
+          : { warm: r(50 + i) < 0.65, sign: SIGNS[(r(60 + i) * SIGNS.length) | 0], col: SIGN_COL[(r(70 + i) * SIGN_COL.length) | 0] },
         seed: b * 13 + i + sa * 7,
       });
       z += len;
@@ -510,7 +512,16 @@
       if (b.shop) {
         const s = b.shop;
         const wq = wallQuad(X, b.z0 + 0.4, b.z1 - 0.4, 0.15, 2.5);
-        if (wq) {
+        if (wq && s.konbini) {
+          // a convenience store: evenly lit shelves under banks of fluorescent light
+          ctx.fillStyle = 'rgba(248,250,255,0.97)';
+          fillQuad(wq);
+          ctx.fillStyle = 'rgba(120,130,150,0.35)';
+          for (const [y0, y1] of [[0.15, 0.3], [0.7, 0.78], [1.2, 1.28], [1.7, 1.78]]) {
+            const iq = wallQuad(X, b.z0 + 0.4, b.z1 - 3, y0, y1);
+            if (iq) fillQuad(iq);
+          }
+        } else if (wq) {
           const gr = ctx.createLinearGradient(0, Math.min(wq[3], wq[5]), 0, Math.max(wq[1], wq[7]));
           const c = s.warm ? '255,205,150' : '215,230,255';
           gr.addColorStop(0, `rgba(${c},0.8)`); gr.addColorStop(0.55, `rgba(${c},0.55)`); gr.addColorStop(1, `rgba(${c},0.35)`);
@@ -530,7 +541,8 @@
         }
         const zc = (b.z0 + b.z1) / 2;
         lights.push({ x: X + (facingRight ? 0.5 : -0.5), y: 1.3, z: zc, col: s.warm ? '255,200,140' : '215,230,255',
-          I: 7, size: (b.z1 - b.z0) * 0.5, refl: 0.22 });
+          I: s.konbini ? 16 : 7, size: (b.z1 - b.z0) * 0.5, refl: s.konbini ? 0.35 : 0.22 });
+        if (s.konbini && !facingRight) drawUmbrellaStand(X - 0.3, b.z0 + 0.7);
         // light spilling out of the window onto the wet pavement, falling off away from the glass
         ctx.save();
         ctx.globalCompositeOperation = 'lighter';
@@ -542,7 +554,12 @@
         ctx.restore();
         if (s.sign !== undefined || s.col) {
           const sq = wallQuad(X, b.z0 + 0.6, b.z1 - 0.6, 2.7, 3.3);
-          if (sq) {
+          if (sq && s.konbini) {
+            // a generic three-stripe fascia (no real brand)
+            const stripes = [['250,250,252', 2.7, 3.3], ['60,170,110', 2.95, 3.05], ['40,110,200', 3.1, 3.2]];
+            for (const [c, y0, y1] of stripes) { const st = wallQuad(X, b.z0 + 0.6, b.z1 - 0.6, y0, y1); if (st) { ctx.fillStyle = `rgb(${c})`; fillQuad(st); } }
+            lights.push({ x: X + (facingRight ? 0.3 : -0.3), y: 3, z: zc, col: '245,246,250', I: 5, size: 1.5, refl: 0.35 });
+          } else if (sq) {
             ctx.fillStyle = `rgba(${s.col},0.9)`;
             fillQuad(sq);
             if (s.sign && zc - cam.z < 40) drawSignText(sq, s.sign, facingRight);
@@ -550,6 +567,24 @@
           }
         }
       }
+    }
+  }
+
+  // the umbrella stand by the door: a row of folded clear umbrellas, handles up
+  function drawUmbrellaStand(X, z0) {
+    for (let k = 0; k < 6; k++) {
+      const z = z0 + k * 0.12, zr = z - cam.z;
+      if (zr < 0.6) continue;
+      const lean = 0.06 * Math.sin(k * 2.3);
+      const a = proj(X, 0.05, z), ax = a.x, ay = a.y;
+      const b = proj(X + lean, 0.75, z), bx = b.x, by = b.y;
+      const w = f * 0.035 / zr;
+      ctx.fillStyle = 'rgba(225,232,245,0.35)';
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx - w, by); ctx.lineTo(bx + w, by); ctx.closePath(); ctx.fill();
+      const h = proj(X + lean, 0.9, z);
+      ctx.strokeStyle = 'rgba(235,238,245,0.7)'; ctx.lineWidth = Math.max(0.6, f * 0.012 / zr);
+      ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(h.x, h.y);
+      ctx.arc(h.x - f * 0.03 / zr, h.y, f * 0.03 / zr, 0, Math.PI, true); ctx.stroke();
     }
   }
 
@@ -1865,7 +1900,24 @@
         note(t, 3100, 2300, 0.07, a * 0.8); note(t + 0.12, 3100, 2300, 0.07, a * 0.8);
       }
     }
-    return { ac, master, update, step, footDrip, carVoice, otherStep, signal, thunder };
+    // entry chime: a tone generator imitating struck metal bars — each note's partials sit at the
+    // free–free bar ratios 1 : 2.76 : 5.40 and decay faster the higher they are; heard from
+    // inside the shop through the opening door
+    function chime(pan, r) {
+      const t = ac.currentTime, out = panner(pan, street), amp = Math.min(0.12, 0.25 / r);
+      const lp = filter('lowpass', 3500);
+      lp.connect(out);
+      [[1319, 0], [1047, 0.42]].forEach(([f0, dt0]) => {
+        [[1, 1, 1.2], [2.76, 0.35, 0.45], [5.4, 0.15, 0.2]].forEach(([m, a, dec]) => {
+          const o = ac.createOscillator(), g = ac.createGain();
+          o.frequency.value = f0 * m;
+          g.gain.setValueAtTime(0.0001, t + dt0); g.gain.exponentialRampToValueAtTime(amp * a, t + dt0 + 0.005);
+          g.gain.exponentialRampToValueAtTime(0.0001, t + dt0 + dec);
+          o.connect(g).connect(lp); o.start(t + dt0); o.stop(t + dt0 + dec + 0.05);
+        });
+      });
+    }
+    return { ac, master, update, step, footDrip, carVoice, otherStep, signal, thunder, chime };
   }
 
   // ---------- loop ----------
@@ -1927,6 +1979,12 @@
       an = Math.max(an, Math.exp(-dz / 6));
     }
     arcadeNear = an;
+    // customers going in and out of a convenience store trigger its entry chime
+    for (const blk of blocks.values()) for (const b of blk.right) {
+      if (!b.shop || !b.shop.konbini) continue;
+      const dz = (b.z0 + b.z1) / 2 - cam.z;
+      if (Math.abs(dz) < 12 && Math.random() < dt * 0.12 && audio) audio.chime(clamp(SIDE_R / Math.hypot(SIDE_R, dz), -1, 1), Math.hypot(SIDE_R, dz));
+    }
     let vn = 0;
     for (const blk of blocks.values()) if (blk.vend) {
       const r = Math.hypot(SIDE_R - 0.75 - cam.x, blk.vend.z + 0.5 - cam.z);
@@ -2005,9 +2063,9 @@
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalCompositeOperation = 'screen';
-    ctx.globalAlpha = 0.16 + 0.1 * (1 - Math.exp(-state.rateNow / 30));   // wetter air → more halo
+    ctx.globalAlpha = 0.1 + 0.08 * (1 - Math.exp(-state.rateNow / 30));   // wetter air → more halo
     ctx.drawImage(glC1, 0, 0, canvas.width, canvas.height);
-    ctx.globalAlpha = 0.25;
+    ctx.globalAlpha = 0.14;
     ctx.drawImage(glC2, 0, 0, canvas.width, canvas.height);
     ctx.restore();
   }
