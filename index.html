@@ -1245,6 +1245,37 @@
   }
 
   // ---------- Resize ----------
+  // At night a window is also a faint mirror: glass reflects ≈ 4 % per surface (Fresnel,
+  // n = 1.52), so the warmly lit room behind you shows up, softly out of focus. And a gentle
+  // vignette, like the natural fall-off of our peripheral vision.
+  let reflection, vignette;
+  function paintOverlays() {
+    reflection = mkCanvas(W, H);
+    const r = reflection.getContext('2d');
+    let gr = r.createRadialGradient(W * 0.82, H * 0.22, 0, W * 0.82, H * 0.22, W * 0.5);
+    gr.addColorStop(0, 'rgba(255,196,130,1)');
+    gr.addColorStop(0.25, 'rgba(255,170,100,0.45)');
+    gr.addColorStop(1, 'rgba(255,150,80,0)');
+    r.fillStyle = gr; r.fillRect(0, 0, W, H);
+    gr = r.createLinearGradient(0, H * 0.55, 0, H);                    // lit desk / sill
+    gr.addColorStop(0, 'rgba(120,90,60,0)'); gr.addColorStop(1, 'rgba(120,90,60,0.5)');
+    r.fillStyle = gr; r.fillRect(0, H * 0.55, W, H * 0.45);
+    for (let x = 0; x < W * 0.16; x += 14) {                            // curtain folds at the edge
+      r.fillStyle = `rgba(200,170,140,${(0.22 + 0.15 * Math.sin(x * 0.45)).toFixed(3)})`;
+      r.fillRect(x, 0, 9, H);
+    }
+    // the room is ~2 m behind us, so its mirror image is far out of focus
+    let cur = reflection;
+    for (let k = 0; k < 4; k++) { const n = mkCanvas(cur.width / 2, cur.height / 2); n.getContext('2d').drawImage(cur, 0, 0, n.width, n.height); cur = n; }
+    for (let k = 0; k < 2; k++) { const n = mkCanvas(cur.width * 2, cur.height * 2); n.getContext('2d').drawImage(cur, 0, 0, n.width, n.height); cur = n; }
+    reflection = cur;
+    vignette = mkCanvas(W, H);
+    const v = vignette.getContext('2d');
+    gr = v.createRadialGradient(W / 2, H * 0.45, Math.min(W, H) * 0.35, W / 2, H * 0.45, Math.hypot(W, H) * 0.62);
+    gr.addColorStop(0, 'rgba(0,0,0,0)'); gr.addColorStop(1, 'rgba(0,0,0,0.42)');
+    v.fillStyle = gr; v.fillRect(0, 0, W, H);
+  }
+
   let renderScale = 1;
   function sizeCanvases() {
     DPR = Math.min(window.devicePixelRatio || 1, 2) * renderScale;
@@ -1260,6 +1291,7 @@
     f = 0.62 * Math.hypot(W, H);
     cx = W / 2; cy = H * 0.42;
     paintBackground();
+    paintOverlays();
     initPinGrid();
     drops.length = 0; splashes.length = 0; ripples.length = 0;
     glassDrops.length = 0; seedGlass();
@@ -1388,7 +1420,15 @@
     drawRain();
     ctx.restore();
 
+    if (state.glass) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = 0.12 * (1 - Math.min(1, flashLevel));   // a bright outside washes it out
+      ctx.drawImage(reflection, 0, 0, W, H);
+      ctx.restore();
+    }
     drawGlass();
+    ctx.drawImage(vignette, 0, 0, W, H);
 
     if (flashLevel > 0.005) {
       const fl = Math.min(1.2, flashLevel);
