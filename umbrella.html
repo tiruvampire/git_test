@@ -1226,7 +1226,7 @@
     d.a = Math.cbrt(1.5 * V / Math.PI);
     return d;
   }
-  let nextCanopyHit = 0, flutterPhase = 0, cover = 0, arcadeNear = 0, vendNear = 0;
+  let nextCanopyHit = 0, flutterPhase = 0, cover = 0, arcadeNear = 0, vendNear = 0, envFacade = 1;
   function seedCanopy() {
     for (let i = 0; i < 260; i++) {
       const spot = visibleCanopySpot();
@@ -1824,11 +1824,27 @@
 
     // footsteps on wet paving: heel strike (a dull knock), then the sole peeling off the
     // wet stone (a short wet "slap" / suction)
+    // Our own footsteps come back off the shop fronts 2.2 m away (2·2.2/343 ≈ 12.8 ms) and,
+    // under the arcade, off the ceiling 1.5 m overhead (≈ 8.7 ms). Where a side street opens
+    // the facade, the echo — and much of the reverberation — disappears: the sound "opens up".
+    const stepBus = gainNode(1);
+    stepBus.connect(master);
+    const facadeEcho = gainNode(0), ceilingEcho = gainNode(0);
+    const d1 = ac.createDelay(0.1), d2 = ac.createDelay(0.1);
+    d1.delayTime.value = 2 * 2.2 / SOUND_SPEED; d2.delayTime.value = 2 * (3.1 - EYE) / SOUND_SPEED;
+    stepBus.connect(d1).connect(filter('lowpass', 5000)).connect(facadeEcho).connect(panner(0.7, master));
+    stepBus.connect(d2).connect(filter('lowpass', 4000)).connect(ceilingEcho).connect(master);
+    function environment(facade, ceiling) {
+      const now = ac.currentTime;
+      facadeEcho.gain.setTargetAtTime(0.45 * facade, now, 0.25);
+      ceilingEcho.gain.setTargetAtTime(0.5 * ceiling, now, 0.25);
+      verbSend.gain.setTargetAtTime(0.12 + 0.13 * facade + 0.15 * ceiling, now, 0.4);
+    }
     function step(side, wet) {
       if (wet) {
         // stepping into a puddle: the sole slaps the water, a sheet splashes out and
         // entrains bubbles — a broadband "ぴちゃ" with a few resonant bubbles
-        const t = ac.currentTime, out = panner(side * 0.2, master);
+        const t = ac.currentTime, out = panner(side * 0.2, stepBus);
         const s = ac.createBufferSource(), g = ac.createGain();
         s.buffer = white;
         g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.5, t + 0.008); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
@@ -1845,7 +1861,7 @@
         return;
       }
       const t = ac.currentTime;
-      const out = panner(side * 0.18, master);
+      const out = panner(side * 0.18, stepBus);
       const k = ac.createBufferSource(), kg = ac.createGain();
       k.buffer = white;
       kg.gain.setValueAtTime(0.35, t); kg.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
@@ -1874,6 +1890,7 @@
 
     function update() {
       players.forEach(p => p());
+      environment(envFacade, cover);
       const now = ac.currentTime, R = state.rateNow, u = Math.abs(state.wind);
       master.gain.setTargetAtTime(state.volume, now, 0.1);
       const x = clamp(Math.log(R / 0.3) / Math.log(100 / 0.3), 0, 1);
@@ -2020,7 +2037,7 @@
         });
       });
     }
-    return { ac, master, update, step, footDrip, carVoice, otherStep, signal, thunder, chime };
+    return { ac, master, update, step, footDrip, carVoice, otherStep, signal, thunder, chime, environment };
   }
 
   // ---------- loop ----------
@@ -2095,6 +2112,9 @@
       vn = Math.max(vn, 1 / (1 + (r / 1.5) ** 2));
     }
     vendNear = vn;
+    // is there a facade beside us, or the open mouth of a side street?
+    const it = nextIntersection();
+    envFacade = it && cam.z > it.zg0 - 0.5 && cam.z < it.zg1 + 0.5 ? 0 : 1;
     if (audio) { audioT += dt; if (audioT > 0.1) { audio.update(); audioT = 0; } }
 
     const kf = Math.min(1, dt / 0.35);
