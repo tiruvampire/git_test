@@ -849,28 +849,49 @@
   const flashes = [];
   let flashLevel = 0, flashPeak = 1, bolt = null, thunderInfo = null;
 
-  function makeBolt(x0, w) {
-    const segs = [];
-    function branch(x, y, angle, width, depth, maxY) {
-      while (y < maxY) {
-        const len = 8 + Math.random() * 18;
-        angle = angle * 0.6 + (Math.random() - 0.5) * 1.1;
-        const nx = x + Math.sin(angle) * len, ny = y + Math.cos(angle) * len;
-        segs.push([x, y, nx, ny, depth]);
-        x = nx; y = ny;
-        if (depth < 3 && Math.random() < 0.07) {
-          branch(x, y, angle + (Math.random() < 0.5 ? -1 : 1) * (0.4 + Math.random() * 0.6),
-            width * 0.45, depth + 1, y + (maxY - y) * (0.2 + Math.random() * 0.5));
+  // A cloud-to-ground discharge as a tortuous 3D channel (mean direction change ≈ 16° per
+  // segment, Hill 1968) with branches and a horizontal in-cloud part. The same geometry is
+  // drawn on screen and used to synthesise the thunder, so what you see is what you hear.
+  function makeChannel(d, az) {
+    const h = 1500 + Math.random() * 1500;                  // cloud base height (m)
+    const gx = d * Math.sin(az), gz = d * Math.cos(az);
+    const segs = [];                                        // [x1,y1,z1,x2,y2,z2,depth]
+    function walk(x, y, z, dx, dy, dz, depth, stopY) {
+      while (y > stopY) {
+        const len = 15 + Math.random() * 45;
+        // pull toward the strike point, randomised by ~16° tortuosity
+        const tx = gx - x, tz = gz - z, ty = -HC - y, tl = Math.hypot(tx, ty, tz) || 1;
+        dx = dx * 0.55 + tx / tl * 0.45 + (Math.random() - 0.5) * 0.55;
+        dy = dy * 0.55 + ty / tl * 0.45 + (Math.random() - 0.5) * 0.3;
+        dz = dz * 0.55 + tz / tl * 0.45 + (Math.random() - 0.5) * 0.55;
+        const m = Math.hypot(dx, dy, dz); dx /= m; dy /= m; dz /= m;
+        const nx = x + dx * len, ny = Math.max(stopY, y + dy * len), nz = z + dz * len;
+        segs.push([x, y, z, nx, ny, nz, depth]);
+        x = nx; y = ny; z = nz;
+        if (depth < 2 && Math.random() < 0.06) {
+          walk(x, y, z, dx + (Math.random() - 0.5) * 1.5, dy, dz + (Math.random() - 0.5) * 1.5, depth + 1, y - (y + HC) * (0.2 + Math.random() * 0.4));
         }
       }
     }
-    branch(x0, -oy - 10, 0, w, 0, cy - 5 - Math.random() * 25);
-    return { segs, w };
+    const top = [gx + (Math.random() - 0.5) * 800, h, gz + (Math.random() - 0.5) * 800];
+    walk(top[0], top[1], top[2], 0, -1, 0, 0, -HC);
+    // in-cloud horizontal channel: invisible, but responsible for the long rolling rumble
+    let x = top[0], z = top[2], hx = Math.random() - 0.5, hz = Math.random() - 0.5;
+    const L = 1000 + Math.random() * 3000;
+    for (let s = 0; s < L; s += 50) {
+      hx += (Math.random() - 0.5) * 0.6; hz += (Math.random() - 0.5) * 0.6;
+      const m = Math.hypot(hx, hz) || 1;
+      const nx = x + hx / m * 50, nz = z + hz / m * 50;
+      segs.push([x, h + 200, z, nx, h + 200 + (Math.random() - 0.5) * 60, nz, 9]);
+      x = nx; z = nz;
+    }
+    return segs;
   }
 
   function lightning(tapX) {
     // distance of the strike (m); a tap asks for one close enough to see the channel
     const d = tapX === undefined ? 400 + Math.pow(Math.random(), 1.6) * 9000 : 300 + Math.random() * 3500;
+    const az = Math.atan(((tapX ?? W * (0.1 + Math.random() * 0.8)) - cx) / f);
     const peak = 0.2 + 0.8 * Math.min(1, 1500 / d);
     flashPeak = peak;
     let t = 0;
@@ -879,9 +900,22 @@
       flashes.push({ delay: t, peak: peak * (i ? 0.45 + Math.random() * 0.5 : 1), age: 0 });
       t += 0.04 + Math.random() * 0.12;
     }
-    bolt = d < 6000 ? makeBolt(tapX ?? W * (0.1 + Math.random() * 0.8), clamp(3000 / d, 0.8, 3.5)) : null;
-    if (audio) audio.thunder(d);
-    thunderInfo = { d, t0: performance.now() };
+    const channel = makeChannel(d, az);
+    bolt = null;
+    if (d < 8000) {
+      const w = clamp(f * 6 / d, 0.8, 3.5);
+      const segs = [];
+      for (const [x1, y1, z1, x2, y2, z2, depth] of channel) {
+        if (depth > 2 || z1 < 50 || z2 < 50) continue;
+        segs.push([cx + f * x1 / z1, cy - f * y1 / z1, cx + f * x2 / z2, cy - f * y2 / z2, depth]);
+      }
+      bolt = { segs, w };
+    }
+    if (audio) audio.thunder(channel);
+    // the first sound comes from the nearest point of the channel, not necessarily the strike point
+    let rmin = Infinity;
+    for (const sg of channel) rmin = Math.min(rmin, Math.hypot(sg[0], sg[1], sg[2]), Math.hypot(sg[3], sg[4], sg[5]));
+    thunderInfo = { d, rmin, t0: performance.now() };
     if (navigator.vibrate) navigator.vibrate(30);
   }
 
@@ -1090,25 +1124,48 @@
       s.start(t, rnd() * 1.5, 0.1);
     }
 
-    // Thunder arrives after d / 343 s; air absorbs high frequencies with distance,
-    // and the long channel makes a rumble instead of a single bang
-    function thunder(d) {
-      const t0 = ac.currentTime + d / SOUND_SPEED;
-      const dur = 2 + d / 1500 + rnd() * 1.5;
-      const amp = Math.min(1.6, 700 / d);
-      const s = loop(pink);
-      const g = ac.createGain();
-      g.gain.setValueAtTime(0.0001, ac.currentTime);
-      g.gain.setValueAtTime(0.0001, t0);
-      g.gain.exponentialRampToValueAtTime(amp, t0 + (d < 1200 ? 0.03 : 0.3));
-      const n = 3 + (rnd() * 4 | 0), step = dur * 0.7 / (n + 1);
-      for (let i = 0; i < n; i++) {
-        g.gain.exponentialRampToValueAtTime(amp * (0.25 + rnd() * 0.6) * (1 - i / n * 0.5),
-          t0 + 0.3 + (i + 1) * step + rnd() * step * 0.4);
+    // Thunder synthesised from the channel geometry (Few 1969; Ribner & Roy 1982):
+    // every few metres of channel emits an N-wave; it arrives after r / c, with amplitude ∝ ΔL / r
+    // and strongest broadside to the segment. Segments perpendicular to the line of sight arrive
+    // together as a sharp "clap"; the spread of path lengths makes the long rumble. N-waves
+    // lengthen with distance (nonlinear propagation) and air absorption removes the highs.
+    function thunder(channel) {
+      const em = [];
+      let rmin = Infinity, rmax = 0;
+      for (const [x1, y1, z1, x2, y2, z2] of channel) {
+        const sl = Math.hypot(x2 - x1, y2 - y1, z2 - z1), n = Math.max(1, Math.round(sl / 4));
+        const ux = (x2 - x1) / sl, uy = (y2 - y1) / sl, uz = (z2 - z1) / sl;
+        for (let k = 0; k < n; k++) {
+          const t = (k + 0.5) / n, x = x1 + (x2 - x1) * t, y = y1 + (y2 - y1) * t, z = z1 + (z2 - z1) * t;
+          const r = Math.hypot(x, y, z);
+          const cosA = (ux * x + uy * y + uz * z) / r;
+          em.push([r, sl / n, 1 - cosA * cosA]);
+          rmin = Math.min(rmin, r); rmax = Math.max(rmax, r);
+        }
       }
-      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-      s.connect(filter('lowpass', clamp(250000 / d, 90, 1200))).connect(g).connect(outdoor);
-      s.stop(t0 + dur + 0.1);
+      const len = Math.floor(((rmax - rmin) / SOUND_SPEED + 1.5) * sr);
+      const buf = ac.createBuffer(2, len, sr), L = buf.getChannelData(0), Rc = buf.getChannelData(1);
+      for (const [r, dl, broad] of em) {
+        const i0 = Math.floor((r - rmin) / SOUND_SPEED * sr);
+        const T = 0.004 * Math.pow(r / 100, 0.25);             // N-wave duration (s)
+        const fc = clamp(8000 * 300 / r, 60, 8000), a1 = Math.exp(-TAU * fc / sr);
+        const amp = 16 * dl * (0.15 + broad) / r * (0.8 + Math.random() * 0.4);
+        const nT = Math.floor(T * sr), m = nT + Math.floor(4 * sr / (TAU * fc));
+        const pan = (Math.random() - 0.5) * 0.6, gl = 1 - pan, gr = 1 + pan;
+        let y = 0;
+        for (let k = 0; k < m && i0 + k < len; k++) {
+          const v = k < nT ? amp * (1 - 2 * k / nT) : 0;
+          y = y * a1 + v * (1 - a1);
+          L[i0 + k] += y * gl; Rc[i0 + k] += y * gr;
+        }
+      }
+      for (let i = 0; i < len; i++) { L[i] = Math.tanh(L[i]); Rc[i] = Math.tanh(Rc[i]); }
+      const s = ac.createBufferSource();
+      s.buffer = buf;
+      const g = gainNode(1);
+      s.connect(g).connect(outdoor);
+      g.connect(verbSend);                                       // extra echoes off buildings
+      s.start(ac.currentTime + rmin / SOUND_SPEED);
     }
 
     function update() {
@@ -1259,17 +1316,17 @@
       `平均雨滴径 ${meanD.toFixed(2)} mm・終端速度 ${termVel(meanD).toFixed(1)} m/s・` +
       `描画中の雨滴 ${drops.length} / 窓 ${glassDrops.length}`;
     if (thunderInfo) {
-      const el = (performance.now() - thunderInfo.t0) / 1000, eta = thunderInfo.d / SOUND_SPEED;
+      const el = (performance.now() - thunderInfo.t0) / 1000, eta = thunderInfo.rmin / SOUND_SPEED;
       const km = (thunderInfo.d / 1000).toFixed(1);
       if (el < eta) hud.textContent = `⚡ ${km} km 先に落雷 — 雷鳴まで ${(eta - el).toFixed(1)} 秒`;
-      else if (el < eta + 3) hud.textContent = `⚡ ${km} km — ゴロゴロ…`;
+      else if (el < eta + 6) hud.textContent = `⚡ ${km} km — ゴロゴロ…`;
       else thunderInfo = null;
       hud.style.opacity = thunderInfo ? 1 : 0;
     }
   }
 
   requestAnimationFrame(frame);
-  if (location.hash === '#debug') window.__rain = { state, get audio() { return audio; } };
+  if (location.hash === '#debug') window.__rain = { state, makeChannel, get audio() { return audio; } };
 
   // ---------- UI ----------
   const $ = id => document.getElementById(id);
