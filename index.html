@@ -7,11 +7,11 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Rain">
-<meta name="theme-color" content="#0b1220">
+<meta name="theme-color" content="#05070c">
 <title>Rain Simulator</title>
 <style>
   :root {
-    --panel: rgba(15, 23, 42, 0.72);
+    --panel: rgba(12, 18, 32, 0.74);
     --text: #e2e8f0;
     --muted: #94a3b8;
     --accent: #7dd3fc;
@@ -19,7 +19,7 @@
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body {
     margin: 0; height: 100%; overflow: hidden;
-    background: #0b1220; color: var(--text);
+    background: #05070c; color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
     touch-action: none; user-select: none; -webkit-user-select: none;
     overscroll-behavior: none;
@@ -28,7 +28,7 @@
   #start {
     position: fixed; inset: 0; display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 16px;
-    background: rgba(11, 18, 32, 0.6); backdrop-filter: blur(6px);
+    background: rgba(5, 7, 12, 0.55); backdrop-filter: blur(6px);
     -webkit-backdrop-filter: blur(6px); z-index: 10; text-align: center; padding: 24px;
   }
   #start h1 { margin: 0; font-size: 28px; font-weight: 600; letter-spacing: 0.02em; }
@@ -49,15 +49,22 @@
     max-width: 480px; margin: 0 auto;
   }
   #panel.hidden { transform: translateY(calc(100% + 40px)); opacity: 0; pointer-events: none; }
-  .row { display: grid; grid-template-columns: 64px 1fr 40px; align-items: center; gap: 10px; font-size: 13px; }
+  .row { display: grid; grid-template-columns: 44px 1fr 78px; align-items: center; gap: 10px; font-size: 13px; }
   .row span:last-child { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
   input[type=range] { width: 100%; accent-color: var(--accent); touch-action: pan-x; }
   .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
   .buttons button { flex: 1; font-size: 13px; padding: 8px 10px; }
   button.on { background: rgba(125, 211, 252, 0.35); }
+  #stats { font-size: 11.5px; color: var(--muted); line-height: 1.6; font-variant-numeric: tabular-nums; }
   #toggle {
     position: fixed; right: 12px; top: calc(12px + env(safe-area-inset-top));
     z-index: 6; padding: 8px 14px; font-size: 13px; background: var(--panel);
+  }
+  #hud {
+    position: fixed; left: 14px; top: calc(18px + env(safe-area-inset-top));
+    z-index: 6; font-size: 13px; color: var(--text); text-shadow: 0 1px 4px #000;
+    font-variant-numeric: tabular-nums; pointer-events: none;
+    transition: opacity .6s; opacity: 0;
   }
 </style>
 </head>
@@ -66,319 +73,949 @@
 
 <div id="start">
   <h1>☔ Rain Simulator</h1>
-  <p>タップで雷 ⚡ / スワイプで風向きを変更<br>「傾き」をオンにするとiPhoneを傾けて風を操作できます</p>
+  <p>雨滴の粒径分布・終端速度・表面張力・音速にもとづく雨<br>
+     タップで落雷 ⚡ / 左右スワイプで風<br>
+     「傾き」をオンにすると、窓の水滴が本当の重力方向へ流れます</p>
   <button id="startBtn">はじめる（音あり）</button>
 </div>
 
+<div id="hud"></div>
 <button id="toggle">設定</button>
 
 <div id="panel" class="hidden">
-  <div class="row"><span>雨量</span><input id="intensity" type="range" min="0" max="100" value="55"><span id="intensityVal">55</span></div>
-  <div class="row"><span>風</span><input id="wind" type="range" min="-100" max="100" value="10"><span id="windVal">10</span></div>
-  <div class="row"><span>音量</span><input id="volume" type="range" min="0" max="100" value="60"><span id="volumeVal">60</span></div>
+  <div class="row"><span>雨量</span><input id="rate" type="range" min="0" max="100" value="55"><span id="rateVal"></span></div>
+  <div class="row"><span>風</span><input id="wind" type="range" min="-150" max="150" value="20"><span id="windVal"></span></div>
+  <div class="row"><span>音量</span><input id="volume" type="range" min="0" max="100" value="60"><span id="volumeVal"></span></div>
   <div class="buttons">
     <button id="glassBtn" class="on">窓ガラス</button>
     <button id="tiltBtn">傾き</button>
     <button id="thunderBtn">雷</button>
   </div>
+  <div id="stats"></div>
 </div>
 
 <script>
 (() => {
+  'use strict';
+  const TAU = Math.PI * 2;
+  const G = 9.81;                 // m/s²
+  const SOUND_SPEED = 343;        // m/s
+  const HC = 3.0;                 // camera height above the street (m) — a 2nd-floor window
+  const ZN = 0.5, ZF = 16;        // depth range of the simulated rain volume (m)
+  const EXPOSURE = 0.03;          // s — motion-blur time of the eye/camera
+  const APERTURE = 0.004;         // m — lens/pupil diameter (depth-of-field blur)
+  const PX_PER_MM = 6.3;          // scale of the window glass (≈ true size on an iPhone screen)
+  const A_C = 1.6;                // mm — contact radius at which a drop starts sliding on vertical glass
+  const LENS = 6;                 // field of view magnification of a drop acting as a ball lens
+  const PC = 6;                   // px — cell size of the glass pinning grid
+
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d');
-  let W = 0, H = 0, DPR = 1;
+  const trail = document.createElement('canvas');
+  const tctx = trail.getContext('2d');
+
+  let W = 0, H = 0, DPR = 1, B = 0, ox = 0, oy = 0, f = 1, cx = 0, cy = 0;
 
   const state = {
-    intensity: 0.55,   // 0..1
-    wind: 0.1,         // -1..1
+    rate: 7,          // rain rate R (mm/h)
+    wind0: 2,         // mean wind (m/s, + = to the right)
+    wind: 2,          // wind including gusts
     volume: 0.6,
     glass: true,
     tilt: false,
-    flash: 0,          // lightning brightness 0..1
+    gx: 0, gy: 1,     // unit gravity direction in screen coords (y down)
+    gip: 1,           // fraction of gravity lying in the glass plane
+    theta: 0,         // world rotation so rain falls along true gravity
   };
 
-  function resize() {
-    DPR = Math.min(window.devicePixelRatio || 1, 2);
-    W = window.innerWidth; H = window.innerHeight;
-    canvas.width = W * DPR; canvas.height = H * DPR;
-    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  // ---------- Rain physics ----------
+  // Terminal velocity of a raindrop, Atlas et al. (1973). D in mm → m/s
+  const termVel = D => Math.max(0.1, 9.65 - 10.3 * Math.exp(-0.6 * D));
+  // Marshall–Palmer drop size distribution N(D) = N0·exp(−ΛD), Λ = 4.1·R^−0.21 mm⁻¹
+  const mpLambda = R => 4.1 * Math.pow(Math.max(R, 0.05), -0.21);
+  function sampleD(R, dmin = 0.5, dmax = 6) {
+    const L = mpLambda(R);
+    return dmin - Math.log(1 - Math.random() * (1 - Math.exp(-L * (dmax - dmin)))) / L;
   }
-  window.addEventListener('resize', resize);
-  resize();
+  // number of visible drops (D > 0.5 mm) per m³, N0 = 8000 m⁻³mm⁻¹
+  const visibleDensity = R => { const L = mpLambda(R); return 8000 / L * Math.exp(-0.5 * L); };
+  const rateFromSlider = s => 0.3 * Math.pow(100 / 0.3, s / 100);   // 0.3 … 100 mm/h, logarithmic
+  const rainClass = R => R < 1 ? '小雨' : R < 10 ? '雨' : R < 20 ? 'やや強い雨' : R < 30 ? '強い雨'
+    : R < 50 ? '激しい雨' : R < 80 ? '非常に激しい雨' : '猛烈な雨';
 
-  // ---------- Falling rain ----------
-  const MAX_DROPS = 900;
+  const mkCanvas = (w, h) => {
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h));
+    return c;
+  };
+  const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+
+  // ---------- Background (night street seen from a window) ----------
+  let bgSharp, bgBlur, bgFlip;
+
+  function paintBackground() {
+    const bs = Math.min(DPR, 1.5);
+    bgSharp = mkCanvas(B * bs, B * bs);
+    const g = bgSharp.getContext('2d');
+    g.scale(bs, bs);
+    const hy = oy + cy;
+    const P = (x, y, z) => [ox + cx + f * x / z, hy - f * y / z];
+
+    let gr = g.createLinearGradient(0, 0, 0, hy);
+    gr.addColorStop(0, '#03050a');
+    gr.addColorStop(0.6, '#0d111e');
+    gr.addColorStop(1, '#2a2330');
+    g.fillStyle = gr;
+    g.fillRect(0, 0, B, hy + 1);
+
+    for (let i = 0; i < 14; i++) {
+      const x = Math.random() * B, y = Math.random() * hy * 0.8, r = 80 + Math.random() * 220;
+      g.save();
+      g.translate(x, y); g.scale(1, 0.45);
+      const cg = g.createRadialGradient(0, 0, 0, 0, 0, r);
+      cg.addColorStop(0, 'rgba(70,72,95,0.12)');
+      cg.addColorStop(1, 'rgba(70,72,95,0)');
+      g.fillStyle = cg;
+      g.beginPath(); g.arc(0, 0, r, 0, TAU); g.fill();
+      g.restore();
+    }
+
+    gr = g.createLinearGradient(0, hy, 0, B);
+    gr.addColorStop(0, '#0d1019');
+    gr.addColorStop(1, '#040509');
+    g.fillStyle = gr;
+    g.fillRect(0, hy, B, B - hy);
+
+    const lights = [];
+    for (const side of [-5.5, 5.5]) {
+      for (let z = 7; z < 150; z += 14) {
+        lights.push({ x: side - Math.sign(side) * 1.2, y: 5 - HC, z, pole: side, col: [255, 172, 92], size: 2.2 });
+      }
+    }
+    const neon = [[255, 60, 90], [80, 220, 255], [120, 255, 140], [255, 200, 60], [200, 110, 255]];
+    for (let i = 0; i < 9; i++) {
+      lights.push({
+        x: (Math.random() - 0.5) * 40, y: 1.5 + Math.random() * 5 - HC, z: 25 + Math.random() * 90,
+        col: neon[i % neon.length], size: 1.2 + Math.random() * 1.5,
+      });
+    }
+
+    // wet asphalt: reflections are mirrored in the ground plane and smeared vertically by its roughness
+    for (const L of lights) {
+      const [sx] = P(L.x, L.y, L.z);
+      const [, gyy] = P(L.x, -HC, L.z);
+      const [, my] = P(L.x, -2 * HC - L.y, L.z);
+      const r = f * L.size / L.z;
+      const len = Math.max(r, my - gyy);
+      g.save();
+      g.translate(sx, gyy + len * 0.7);
+      g.scale(1, Math.max(1.5, len / r));
+      const rg = g.createRadialGradient(0, 0, 0, 0, 0, r * 0.7);
+      rg.addColorStop(0, `rgba(${L.col},0.32)`);
+      rg.addColorStop(1, `rgba(${L.col},0)`);
+      g.fillStyle = rg;
+      g.beginPath(); g.arc(0, 0, r * 0.7, 0, TAU); g.fill();
+      g.restore();
+    }
+
+    drawSkyline(g, hy + 3, 18, 60, 15, 90, '#111523', 0.18, 0.55);
+    gr = g.createLinearGradient(0, hy - 130, 0, hy + 6);
+    gr.addColorStop(0, 'rgba(45,42,58,0)');
+    gr.addColorStop(1, 'rgba(45,42,58,0.55)');
+    g.fillStyle = gr;
+    g.fillRect(0, hy - 130, B, 136);
+    drawSkyline(g, hy + 9, 40, 110, 40, 210, '#070a11', 0.14, 1);
+
+    for (const L of lights) {
+      const [sx, sy] = P(L.x, L.y, L.z);
+      if (L.pole !== undefined) {
+        const [bx, by] = P(L.pole, -HC, L.z);
+        const [tx, ty] = P(L.pole, L.y + 0.2, L.z);
+        g.strokeStyle = '#161923';
+        g.lineWidth = Math.max(0.5, f * 0.15 / L.z);
+        g.beginPath(); g.moveTo(bx, by); g.lineTo(tx, ty); g.lineTo(sx, sy); g.stroke();
+      }
+      const r = f * L.size / L.z;
+      const rg = g.createRadialGradient(sx, sy, 0, sx, sy, r);
+      rg.addColorStop(0, `rgba(${L.col},0.6)`);
+      rg.addColorStop(0.35, `rgba(${L.col},0.16)`);
+      rg.addColorStop(1, `rgba(${L.col},0)`);
+      g.fillStyle = rg;
+      g.beginPath(); g.arc(sx, sy, r, 0, TAU); g.fill();
+      g.fillStyle = 'rgba(255,245,225,0.95)';
+      g.beginPath(); g.arc(sx, sy, Math.max(0.7, f * 0.1 / L.z), 0, TAU); g.fill();
+    }
+
+    // blurred copy = what you see when your eyes focus on the glass
+    const small = mkCanvas(B / 12, B / 12);
+    small.getContext('2d').drawImage(bgSharp, 0, 0, small.width, small.height);
+    bgBlur = mkCanvas(B / 4, B / 4);
+    const bctx = bgBlur.getContext('2d');
+    bctx.imageSmoothingQuality = 'high';
+    bctx.drawImage(small, 0, 0, bgBlur.width, bgBlur.height);
+
+    // rotated 180°: a water drop is a tiny ball lens that shows the scene upside down
+    bgFlip = mkCanvas(B * 0.5, B * 0.5);
+    const fctx = bgFlip.getContext('2d');
+    fctx.translate(bgFlip.width, bgFlip.height);
+    fctx.rotate(Math.PI);
+    fctx.drawImage(bgSharp, 0, 0, bgFlip.width, bgFlip.height);
+  }
+
+  function drawSkyline(g, base, wMin, wMax, hMin, hMax, color, winProb, ws) {
+    let x = -Math.random() * wMax;
+    while (x < B) {
+      const w = wMin + Math.random() * (wMax - wMin);
+      const h = hMin + Math.pow(Math.random(), 1.5) * (hMax - hMin);
+      g.fillStyle = color;
+      g.fillRect(x, base - h, w, h + 2);
+      const gx = 5 * ws, gy = 7 * ws;
+      for (let wy = base - h + gy; wy < base - gy; wy += gy) {
+        for (let wx = x + gx * 0.6; wx < x + w - gx * 0.6; wx += gx) {
+          if (Math.random() < winProb) {
+            g.fillStyle = Math.random() < 0.75
+              ? `rgba(255,${190 + Math.random() * 40 | 0},120,${0.3 + Math.random() * 0.5})`
+              : `rgba(170,210,255,${0.25 + Math.random() * 0.4})`;
+            g.fillRect(wx, wy, 2.2 * ws, 3 * ws);
+          }
+        }
+      }
+      x += w + Math.random() * 6 - 1;
+    }
+  }
+
+  // ---------- Falling rain (3D) ----------
   const drops = [];
   const splashes = [];
+  const ripples = [];
 
-  function spawnDrop(anywhere) {
-    const z = Math.random();              // depth: 0 = far, 1 = near
-    const speed = 500 + z * 900;          // px/s
-    return {
-      x: Math.random() * (W + 400) - 200,
-      y: anywhere ? Math.random() * H : -Math.random() * 100 - 20,
-      z, speed,
-      len: 8 + z * 22,
-    };
+  function spawnDrop(d, initial) {
+    d.z = Math.cbrt(ZN ** 3 + Math.random() * (ZF ** 3 - ZN ** 3));   // uniform in the view volume
+    d.D = sampleD(state.rate);
+    d.v = termVel(d.D);
+    d.xl = -B / 2 * d.z / f;
+    d.xr = B / 2 * d.z / f;
+    const ytop = (cy + oy) * d.z / f;
+    const drift = state.wind * (ytop + HC) / d.v;
+    d.x = d.xl - Math.max(0, drift) + Math.random() * (d.xr - d.xl + Math.abs(drift));
+    d.y = initial ? -HC + Math.random() * (ytop + HC) : ytop + Math.random() * 0.3;
+    d.vx = state.wind;
+    return d;
+  }
+
+  function targetDropCount() {
+    return Math.min(2400, visibleDensity(state.rate) * (B * B) / (930 * 930));
+  }
+
+  function impact(d) {
+    if (d.z > 12) return;
+    if (ripples.length < 320) {
+      ripples.push({ x: d.x, z: d.z, age: 0, life: 0.45 + d.D * 0.12, amp: Math.min(1, d.D / 3) });
+    }
+    if (d.z < 7 && d.D > 0.9 && splashes.length < 700) {
+      // crown splash: secondary droplets thrown out ballistically
+      const n = Math.min(8, (d.D * 1.6 + Math.random() * 2) | 0);
+      const s0 = 0.35 * Math.sqrt(d.v);
+      for (let k = 0; k < n; k++) {
+        const el = (15 + Math.random() * 50) * Math.PI / 180, az = Math.random() * TAU;
+        const sp = s0 * (0.5 + Math.random());
+        splashes.push({
+          x: d.x, y: -HC + 0.001, z: d.z,
+          vx: sp * Math.cos(el) * Math.cos(az) + d.vx * 0.2,
+          vy: sp * Math.sin(el),
+          vz: sp * Math.cos(el) * Math.sin(az),
+          D: d.D * (0.15 + Math.random() * 0.25),
+        });
+      }
+    }
   }
 
   function updateRain(dt) {
-    const target = Math.floor(MAX_DROPS * state.intensity * (W * H) / (390 * 844));
-    const cap = Math.min(target, 1600);
-    while (drops.length < cap) drops.push(spawnDrop(drops.length === 0));
-    if (drops.length > cap) drops.length = cap;
+    const target = targetDropCount() | 0;
+    while (drops.length < target) drops.push(spawnDrop({}, true));
+    if (drops.length > target) drops.length = target;
 
-    const windPx = state.wind * 600;
-    for (let i = 0; i < drops.length; i++) {
-      const d = drops[i];
-      d.x += windPx * dt * (0.5 + d.z * 0.5);
-      d.y += d.speed * dt;
-      if (d.y > H - 4 - (1 - d.z) * 30) {
-        if (d.z > 0.35 && splashes.length < 400) {
-          const n = 2 + (Math.random() * 3 | 0);
-          for (let k = 0; k < n; k++) {
-            splashes.push({
-              x: d.x, y: d.y,
-              vx: (Math.random() - 0.5) * 160 + windPx * 0.2,
-              vy: -Math.random() * 180 - 60,
-              life: 0.35 + Math.random() * 0.2, age: 0, z: d.z,
-            });
-          }
-        }
-        drops[i] = spawnDrop(false);
-      } else if (d.x < -250 || d.x > W + 250) {
-        drops[i] = spawnDrop(false);
-      }
+    const U = state.wind;
+    const margin = 2 + Math.abs(U) * 3;
+    for (const d of drops) {
+      // horizontal drag relaxes the drop's velocity toward the wind, τ = v_t / g
+      const tau = d.v / G;
+      d.vx += (U - d.vx) * Math.min(1, dt / tau);
+      d.x += d.vx * dt;
+      d.y -= d.v * dt;
+      if (d.y <= -HC) { impact(d); spawnDrop(d, false); }
+      else if (d.x < d.xl - margin || d.x > d.xr + margin) spawnDrop(d, false);
     }
+
     for (let i = splashes.length - 1; i >= 0; i--) {
       const s = splashes[i];
-      s.age += dt;
-      s.vy += 900 * dt;
-      s.x += s.vx * dt; s.y += s.vy * dt;
-      if (s.age > s.life) splashes.splice(i, 1);
+      s.vy -= G * dt;
+      s.x += s.vx * dt; s.y += s.vy * dt; s.z += s.vz * dt;
+      if (s.y < -HC || s.z < 0.2) { splashes[i] = splashes[splashes.length - 1]; splashes.pop(); }
     }
+    for (let i = ripples.length - 1; i >= 0; i--) {
+      const r = ripples[i];
+      r.age += dt;
+      if (r.age > r.life) { ripples[i] = ripples[ripples.length - 1]; ripples.pop(); }
+    }
+  }
+
+  // stroke batching: bucket by alpha and width so thousands of streaks cost ~30 draw calls
+  const AB = 6, WB = 5, WREP = [0.6, 1.1, 1.9, 3.2, 5.5], WEDGE = [0.85, 1.5, 2.5, 4.2];
+  let buckets = [];
+  function bucket(alpha, width) {
+    if (alpha < 0.012) return null;
+    const ai = Math.min(AB - 1, (alpha / 0.6 * AB) | 0);
+    let wi = 0;
+    while (wi < 4 && width > WEDGE[wi]) wi++;
+    const k = ai * WB + wi;
+    return buckets[k] || (buckets[k] = new Path2D());
+  }
+  function flushBuckets(rgb) {
+    ctx.lineCap = 'round';
+    for (let k = 0; k < buckets.length; k++) {
+      const p = buckets[k];
+      if (!p) continue;
+      const ai = (k / WB) | 0, wi = k % WB;
+      ctx.strokeStyle = `rgba(${rgb},${((ai + 0.5) / AB * 0.6).toFixed(3)})`;
+      ctx.lineWidth = WREP[wi];
+      ctx.stroke(p);
+    }
+    buckets = [];
+  }
+
+  function streak(x, y, z, vx, vy, vz, D, focus) {
+    const x2 = x - vx * EXPOSURE, y2 = y - vy * EXPOSURE, z2 = z - vz * EXPOSURE;
+    if (z < 0.2 || z2 < 0.2) return;
+    const s1x = cx + f * x / z, s1y = cy - f * y / z;
+    const s2x = cx + f * x2 / z2, s2y = cy - f * y2 / z2;
+    if ((s1x < -ox && s2x < -ox) || (s1x > W + ox && s2x > W + ox) || s1y < -oy || s2y > H + oy) return;
+    const wPhys = f * D * 1e-3 / z;
+    const coc = f * APERTURE * Math.abs(1 / z - 1 / focus);   // circle of confusion
+    const width = Math.max(0.5, wPhys) + coc;
+    const alpha = (0.18 + 0.5 * Math.min(1, D / 3)) * Math.exp(-z / 14) * Math.min(1, (wPhys * 2 + 0.35) / width);
+    const p = bucket(Math.min(0.6, alpha), width);
+    if (!p) return;
+    p.moveTo(s1x, s1y);
+    p.lineTo(s2x, s2y);
   }
 
   function drawRain() {
-    const windPx = state.wind * 600;
-    ctx.lineCap = 'round';
-    for (const d of drops) {
-      const dx = (windPx * (0.5 + d.z * 0.5)) / d.speed * d.len;
-      ctx.strokeStyle = `rgba(180, 205, 235, ${0.15 + d.z * 0.45})`;
-      ctx.lineWidth = 0.6 + d.z * 1.2;
-      ctx.beginPath();
-      ctx.moveTo(d.x, d.y);
-      ctx.lineTo(d.x - dx, d.y - d.len);
-      ctx.stroke();
+    const focus = state.glass ? 0.4 : 8;
+
+    const rp = [new Path2D(), new Path2D(), new Path2D()];
+    for (const r of ripples) {
+      const t = r.age / r.life;
+      const a = (1 - t) * (1 - t) * r.amp;
+      const rad = 0.004 + 0.23 * r.age;       // capillary–gravity waves travel ≈ 0.23 m/s
+      const sx = cx + f * r.x / r.z, sy = cy + f * HC / r.z;
+      const rx = f * rad / r.z, ry = rx * HC / r.z;
+      if (sx + rx < -ox || sx - rx > W + ox || sy > H + oy) continue;
+      const p = rp[Math.min(2, (a * 3) | 0)];
+      p.moveTo(sx + rx, sy);
+      p.ellipse(sx, sy, rx, ry, 0, 0, TAU);
+      if (r.amp > 0.5 && t < 0.6) {
+        p.moveTo(sx + rx * 0.55, sy);
+        p.ellipse(sx, sy, rx * 0.55, ry * 0.55, 0, 0, TAU);
+      }
     }
-    ctx.fillStyle = 'rgba(190, 215, 240, 0.6)';
-    for (const s of splashes) {
-      const r = (1 - s.age / s.life) * (0.8 + s.z);
-      ctx.beginPath();
-      ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
-      ctx.fill();
+    ctx.lineWidth = state.glass ? 2 : 0.8;
+    rp.forEach((p, i) => {
+      ctx.strokeStyle = `rgba(175,190,215,${(state.glass ? 0.06 : 0.12) * (i + 1)})`;
+      ctx.stroke(p);
+    });
+
+    for (const s of splashes) streak(s.x, s.y, s.z, s.vx, s.vy, s.vz, s.D, focus);
+    for (const d of drops) streak(d.x, d.y, d.z, d.vx, -d.v, 0, d.D, focus);
+    flushBuckets('200,208,225');
+  }
+
+  // ---------- Drops on the window glass ----------
+  const glassDrops = [];
+  let gw = 0, gh = 0, pinBase = null, pinCur = null;
+  let nextGlassHit = 0, pinRelaxT = 0, trailFadeT = 0;
+
+  function initPinGrid() {
+    gw = Math.ceil(W / PC) + 2; gh = Math.ceil(H / PC) + 2;
+    pinBase = new Float32Array(gw * gh);
+    pinCur = new Float32Array(gw * gh);
+    const S = 6, cw = Math.ceil(gw / S) + 2, ch = Math.ceil(gh / S) + 2;
+    const coarse = new Float32Array(cw * ch).map(() => 0.8 + Math.random() * 0.45);
+    for (let j = 0; j < gh; j++) {
+      for (let i = 0; i < gw; i++) {
+        const u = i / S, v = j / S, i0 = u | 0, j0 = v | 0, fu = u - i0, fv = v - j0;
+        const c = coarse[i0 + j0 * cw] * (1 - fu) * (1 - fv) + coarse[i0 + 1 + j0 * cw] * fu * (1 - fv)
+          + coarse[i0 + (j0 + 1) * cw] * (1 - fu) * fv + coarse[i0 + 1 + (j0 + 1) * cw] * fu * fv;
+        pinBase[i + j * gw] = c * (0.85 + Math.random() * 0.35);
+      }
+    }
+    pinCur.set(pinBase);
+  }
+  function pinIndex(x, y) {
+    const i = clamp((x / PC) | 0, 0, gw - 1), j = clamp((y / PC) | 0, 0, gh - 1);
+    return i + j * gw;
+  }
+  const pinAt = (x, y) => pinCur[pinIndex(x, y)];
+  function wetPath(x, y, r) {
+    // a drop that just passed leaves a water film: lower contact-angle hysteresis, so later drops follow
+    const n = Math.ceil(r / PC);
+    const i0 = (x / PC) | 0, j0 = (y / PC) | 0;
+    for (let j = j0 - n; j <= j0 + n; j++) {
+      if (j < 0 || j >= gh) continue;
+      for (let i = i0 - n; i <= i0 + n; i++) {
+        if (i < 0 || i >= gw) continue;
+        const k = i + j * gw;
+        pinCur[k] = Math.min(pinCur[k], pinBase[k] * 0.45);
+      }
     }
   }
 
-  // ---------- Drops on window glass ----------
-  const glassDrops = [];
+  function makeGlassDrop(x, y, V) {
+    const d = { x, y, V, a: 0, r: 0, moving: false, speed: 0, steer: 0, dep: 0, depT: 0.05 + Math.random() * 0.2, fresh: true };
+    setDropVolume(d);
+    return d;
+  }
+  // a drop on glass is roughly a spherical cap with ~90° contact angle: V = 2/3·π·a³
+  function setDropVolume(d) { d.a = Math.cbrt(1.5 * d.V / Math.PI); d.r = d.a * PX_PER_MM; }
+
+  // the window has already been rained on for a while
+  function seedGlass() {
+    const n = (W * H) / (390 * 844) * (60 + 12 * Math.sqrt(state.rate));
+    for (let i = 0; i < n; i++) {
+      const D = sampleD(state.rate) * (0.4 + Math.random() * 0.5);
+      const d = makeGlassDrop(Math.random() * W, Math.random() * H, Math.PI / 6 * D * D * D);
+      d.fresh = false;
+      glassDrops.push(d);
+    }
+  }
+
+  function glassImpact() {
+    const D = sampleD(state.rate);
+    const V = Math.PI / 6 * D * D * D;
+    const x = Math.random() * W, y = Math.random() * H;
+    if (D > 2.5) {
+      // large drops shatter on impact into a main drop plus satellites
+      glassDrops.push(makeGlassDrop(x, y, V * 0.6));
+      const n = 3 + (Math.random() * 4 | 0);
+      for (let k = 0; k < n; k++) {
+        const ang = Math.random() * TAU, dist = D * PX_PER_MM * (1 + Math.random() * 2.5);
+        glassDrops.push(makeGlassDrop(x + Math.cos(ang) * dist, y + Math.sin(ang) * dist, V * 0.4 / n));
+      }
+    } else {
+      glassDrops.push(makeGlassDrop(x, y, V));
+    }
+    if (audio) audio.tick(D, x / W * 1.6 - 0.8);
+  }
+
   function updateGlass(dt) {
     if (!state.glass) { glassDrops.length = 0; return; }
-    const spawnRate = 25 * state.intensity;
-    if (Math.random() < spawnRate * dt && glassDrops.length < 140) {
-      glassDrops.push({
-        x: Math.random() * W, y: Math.random() * H,
-        r: 1.5 + Math.random() * 4, vy: 0, moving: false,
-      });
+
+    // Poisson arrivals; more rain hits the window when the wind blows
+    const lambda = 4 * Math.pow(state.rate, 0.75) * (0.35 + Math.abs(state.wind) / 6) * (W * H) / (390 * 844);
+    nextGlassHit -= dt;
+    while (nextGlassHit <= 0) {
+      if (glassDrops.length < 650) glassImpact();
+      nextGlassHit += -Math.log(1 - Math.random()) / lambda;
     }
-    for (let i = glassDrops.length - 1; i >= 0; i--) {
-      const g = glassDrops[i];
-      if (!g.moving && g.r > 4.2 && Math.random() < 0.4 * dt) g.moving = true;
-      if (g.moving) {
-        g.vy = Math.min(g.vy + 200 * dt, 60 + g.r * 25);
-        g.y += g.vy * dt * (0.6 + Math.random() * 0.8);
-        g.x += state.wind * 20 * dt + (Math.random() - 0.5) * 0.6;
-        g.r -= 0.12 * dt;  // leaves a trail, shrinks slightly
+
+    pinRelaxT += dt;
+    if (pinRelaxT > 0.25) {
+      for (let k = 0; k < pinCur.length; k++) pinCur[k] += (pinBase[k] - pinCur[k]) * 0.008;
+      pinRelaxT = 0;
+    }
+
+    const gx = state.gx, gy = state.gy, px = -gy, py = gx;
+    tctx.lineCap = 'butt';
+    for (const d of glassDrops) {
+      const pin = pinAt(d.x, d.y) * (d.moving ? 0.75 : 1);
+      // gravity (∝ a³) vs. contact-line pinning force (∝ a): slides once a² exceeds a threshold
+      const q = d.a * d.a * state.gip / (A_C * A_C * pin);
+      if (q > 1) {
+        d.moving = true;
+        d.speed = Math.min(250, 10 + 40 * (q - 1)) * PX_PER_MM;
+        const off = d.r * 1.3 + 3;
+        const pl = pinAt(d.x + (px + gx) * off, d.y + (py + gy) * off);
+        const pr = pinAt(d.x + (-px + gx) * off, d.y + (-py + gy) * off);
+        d.steer += ((pr - pl) * 2 + (Math.random() - 0.5) * 0.8 - d.steer) * Math.min(1, dt * 6);
+        let dx = gx + px * d.steer, dy = gy + py * d.steer;
+        const m = Math.hypot(dx, dy); dx /= m; dy /= m;
+        const ds = d.speed * dt;
+        const x0 = d.x, y0 = d.y;
+        d.x += dx * ds; d.y += dy * ds;
+        wetPath(d.x, d.y, d.r);
+        tctx.strokeStyle = 'rgba(150,180,220,0.045)';
+        tctx.lineWidth = d.r * 1.2;
+        tctx.beginPath(); tctx.moveTo(x0, y0); tctx.lineTo(d.x, d.y); tctx.stroke();
+
+        // the sliding drop sheds volume into a trail of tiny residual beads
+        const loss = Math.min(d.V * 0.5, 0.01 * d.a * ds / PX_PER_MM);
+        d.V -= loss; d.dep += loss;
+        if (d.dep > d.depT) {
+          const res = makeGlassDrop(0, 0, d.dep);
+          res.fresh = false;
+          const back = d.r + res.r + 0.5;
+          res.x = d.x - dx * back; res.y = d.y - dy * back;
+          glassDrops.push(res);
+          d.dep = 0; d.depT = 0.05 + Math.random() * 0.2;
+        }
+        setDropVolume(d);
+      } else {
+        d.moving = false; d.speed = 0;
       }
-      // merge with nearby drops
-      for (let j = i - 1; j >= 0; j--) {
-        const o = glassDrops[j];
-        const dx = o.x - g.x, dy = o.y - g.y;
-        if (dx * dx + dy * dy < (g.r + o.r) * (g.r + o.r) * 0.6) {
-          g.r = Math.sqrt(g.r * g.r + o.r * o.r);
-          g.moving = g.moving || o.moving;
-          glassDrops.splice(j, 1); i--;
+      d.V -= dt * 0.0004 * d.a;    // slow evaporation
+      if (d.V < 0.004) d.dead = true;
+      else setDropVolume(d);
+      if (d.y - d.r > H || d.y + d.r < 0 || d.x + d.r < 0 || d.x - d.r > W) d.dead = true;
+    }
+
+    mergeGlassDrops();
+
+    trailFadeT += dt;
+    if (trailFadeT > 0.5) {
+      tctx.globalCompositeOperation = 'destination-out';
+      tctx.fillStyle = 'rgba(0,0,0,0.05)';
+      tctx.fillRect(0, 0, W, H);
+      tctx.globalCompositeOperation = 'source-over';
+      trailFadeT = 0;
+    }
+  }
+
+  function mergeGlassDrops() {
+    const cs = 32, map = new Map();
+    const key = (i, j) => i * 8192 + j;
+    glassDrops.forEach((d, idx) => {
+      if (d.dead) return;
+      const k = key((d.x / cs) | 0, (d.y / cs) | 0);
+      let a = map.get(k);
+      if (!a) map.set(k, a = []);
+      a.push(idx);
+    });
+    for (let i = 0; i < glassDrops.length; i++) {
+      const d = glassDrops[i];
+      if (d.dead || !(d.moving || d.fresh)) continue;
+      const ci = (d.x / cs) | 0, cj = (d.y / cs) | 0;
+      let merged = false;
+      for (let a = -1; a <= 1; a++) {
+        for (let b = -1; b <= 1; b++) {
+          const list = map.get(key(ci + a, cj + b));
+          if (!list) continue;
+          for (const j of list) {
+            if (j === i) continue;
+            const o = glassDrops[j];
+            if (o.dead) continue;
+            const dx = o.x - d.x, dy = o.y - d.y, rr = (d.r + o.r) * 0.8;
+            if (dx * dx + dy * dy < rr * rr) {
+              // volume is conserved; the new centre is the volume-weighted average
+              const V = d.V + o.V;
+              d.x = (d.x * d.V + o.x * o.V) / V;
+              d.y = (d.y * d.V + o.y * o.V) / V;
+              d.V = V; setDropVolume(d);
+              o.dead = true; merged = true;
+            }
+          }
         }
       }
-      if (g.y - g.r > H || g.r < 0.8) glassDrops.splice(glassDrops.indexOf(g), 1);
+      d.fresh = merged;
     }
+    let w = 0;
+    for (let i = 0; i < glassDrops.length; i++) if (!glassDrops[i].dead) glassDrops[w++] = glassDrops[i];
+    glassDrops.length = w;
   }
+
+  const shade = (() => {
+    const c = mkCanvas(128, 128), s = c.getContext('2d');
+    let gr = s.createRadialGradient(64, 72, 8, 64, 64, 64);
+    gr.addColorStop(0, 'rgba(255,255,255,0.10)');
+    gr.addColorStop(0.55, 'rgba(0,0,0,0)');
+    gr.addColorStop(0.82, 'rgba(0,0,0,0.28)');
+    gr.addColorStop(1, 'rgba(0,0,0,0.65)');
+    s.fillStyle = gr; s.beginPath(); s.arc(64, 64, 64, 0, TAU); s.fill();
+    gr = s.createRadialGradient(64, 102, 0, 64, 102, 26);
+    gr.addColorStop(0, 'rgba(255,240,220,0.2)'); gr.addColorStop(1, 'rgba(255,240,220,0)');
+    s.fillStyle = gr; s.beginPath(); s.arc(64, 102, 26, 0, TAU); s.fill();
+    gr = s.createRadialGradient(48, 34, 0, 48, 34, 16);
+    gr.addColorStop(0, 'rgba(255,255,255,0.85)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+    s.fillStyle = gr; s.beginPath(); s.arc(48, 34, 16, 0, TAU); s.fill();
+    return c;
+  })();
 
   function drawGlass() {
-    for (const g of glassDrops) {
-      const grad = ctx.createRadialGradient(g.x - g.r * 0.3, g.y - g.r * 0.4, g.r * 0.1, g.x, g.y, g.r);
-      grad.addColorStop(0, 'rgba(255,255,255,0.55)');
-      grad.addColorStop(0.5, 'rgba(160,190,225,0.18)');
-      grad.addColorStop(1, 'rgba(20,30,50,0.35)');
-      ctx.fillStyle = grad;
+    if (!state.glass) return;
+    ctx.drawImage(trail, 0, 0, W, H);
+    const fs = bgFlip.width / B;
+    const rot = state.theta, cosT = Math.cos(rot), sinT = Math.sin(rot);
+    const small = new Path2D();
+    for (const d of glassDrops) {
+      if (d.r < 1.6) {
+        small.moveTo(d.x + d.r, d.y);
+        small.arc(d.x, d.y, d.r, 0, TAU);
+        continue;
+      }
+      const e = d.moving ? Math.min(0.35, d.speed / (PX_PER_MM * 300)) : 0;
+      const rx = d.r * (1 - e * 0.3), ry = d.r * (1 + e);
+      // where this point of the glass looks at in the (rotated) background
+      const dx = d.x - W / 2, dy = d.y - H / 2;
+      const bx = cosT * dx + sinT * dy + B / 2, by = -sinT * dx + cosT * dy + B / 2;
+      const s = Math.min(bgFlip.width - 1, ry * 2 * LENS * fs);
+      const sx = clamp((B - bx) * fs - s / 2, 0, bgFlip.width - s);
+      const sy = clamp((B - by) * fs - s / 2, 0, bgFlip.height - s);
+      ctx.save();
       ctx.beginPath();
-      ctx.ellipse(g.x, g.y, g.r, g.r * (g.moving ? 1.25 : 1), 0, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.ellipse(d.x, d.y, rx, ry, rot, 0, TAU);
+      ctx.clip();
+      ctx.drawImage(bgFlip, sx, sy, s, s, d.x - ry, d.y - ry, ry * 2, ry * 2);
+      ctx.translate(d.x, d.y);
+      ctx.rotate(rot);
+      ctx.drawImage(shade, -rx, -ry, rx * 2, ry * 2);
+      ctx.restore();
     }
+    ctx.fillStyle = 'rgba(8,12,20,0.32)';
+    ctx.fill(small);
   }
 
-  // ---------- Background & lightning ----------
-  let bolt = null;
-  function makeBolt(x) {
-    const pts = [{ x, y: 0 }];
-    let cx = x, cy = 0;
-    while (cy < H * (0.5 + Math.random() * 0.35)) {
-      cx += (Math.random() - 0.5) * 70;
-      cy += 20 + Math.random() * 40;
-      pts.push({ x: cx, y: cy });
+  // ---------- Lightning ----------
+  const flashes = [];
+  let flashLevel = 0, flashPeak = 1, bolt = null, thunderInfo = null;
+
+  function makeBolt(x0, w) {
+    const segs = [];
+    function branch(x, y, angle, width, depth, maxY) {
+      while (y < maxY) {
+        const len = 8 + Math.random() * 18;
+        angle = angle * 0.6 + (Math.random() - 0.5) * 1.1;
+        const nx = x + Math.sin(angle) * len, ny = y + Math.cos(angle) * len;
+        segs.push([x, y, nx, ny, depth]);
+        x = nx; y = ny;
+        if (depth < 3 && Math.random() < 0.07) {
+          branch(x, y, angle + (Math.random() < 0.5 ? -1 : 1) * (0.4 + Math.random() * 0.6),
+            width * 0.45, depth + 1, y + (maxY - y) * (0.2 + Math.random() * 0.5));
+        }
+      }
     }
-    return { pts, age: 0 };
+    branch(x0, -oy - 10, 0, w, 0, cy - 5 - Math.random() * 25);
+    return { segs, w };
   }
 
-  function lightning(x) {
-    state.flash = 1;
-    bolt = makeBolt(x ?? Math.random() * W);
-    if (audio) audio.thunder(0.4 + Math.random() * 1.4);
+  function lightning(tapX) {
+    // distance of the strike (m); a tap asks for one close enough to see the channel
+    const d = tapX === undefined ? 400 + Math.pow(Math.random(), 1.6) * 9000 : 300 + Math.random() * 3500;
+    const peak = 0.2 + 0.8 * Math.min(1, 1500 / d);
+    flashPeak = peak;
+    let t = 0;
+    const strokes = 1 + (Math.random() * 4 | 0);            // return strokes flicker
+    for (let i = 0; i < strokes; i++) {
+      flashes.push({ delay: t, peak: peak * (i ? 0.45 + Math.random() * 0.5 : 1), age: 0 });
+      t += 0.04 + Math.random() * 0.12;
+    }
+    bolt = d < 6000 ? makeBolt(tapX ?? W * (0.1 + Math.random() * 0.8), clamp(3000 / d, 0.8, 3.5)) : null;
+    if (audio) audio.thunder(d);
+    thunderInfo = { d, t0: performance.now() };
     if (navigator.vibrate) navigator.vibrate(30);
   }
 
-  function drawBackground() {
-    const g = ctx.createLinearGradient(0, 0, 0, H);
-    const f = state.flash;
-    const dark = 1 - state.intensity * 0.4;
-    g.addColorStop(0, `rgb(${18 * dark + f * 150 | 0}, ${26 * dark + f * 160 | 0}, ${44 * dark + f * 180 | 0})`);
-    g.addColorStop(1, `rgb(${8 + f * 60 | 0}, ${12 + f * 70 | 0}, ${22 + f * 90 | 0})`);
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, W, H);
-
-    // wet ground reflection band
-    const gg = ctx.createLinearGradient(0, H - 60, 0, H);
-    gg.addColorStop(0, 'rgba(120,150,190,0)');
-    gg.addColorStop(1, `rgba(120,150,190,${0.08 + f * 0.3})`);
-    ctx.fillStyle = gg;
-    ctx.fillRect(0, H - 60, W, 60);
+  function updateFlash(dt) {
+    flashLevel = 0;
+    for (let i = flashes.length - 1; i >= 0; i--) {
+      const fl = flashes[i];
+      fl.age += dt;
+      const t = fl.age - fl.delay;
+      if (t >= 0) flashLevel += fl.peak * Math.exp(-t / 0.06);
+      if (t > 0.6) flashes.splice(i, 1);
+    }
+    if (!flashes.length) bolt = null;
   }
 
-  function drawBolt(dt) {
-    if (!bolt) return;
-    bolt.age += dt;
-    const a = Math.max(0, 1 - bolt.age / 0.35);
-    if (a <= 0) { bolt = null; return; }
+  function drawBolt() {
+    if (!bolt || flashLevel < 0.02) return;
+    const a = Math.min(1, flashLevel / flashPeak * 1.2);
+    const paths = [new Path2D(), new Path2D(), new Path2D(), new Path2D()];
+    for (const [x1, y1, x2, y2, depth] of bolt.segs) { paths[depth].moveTo(x1, y1); paths[depth].lineTo(x2, y2); }
     ctx.save();
-    ctx.shadowColor = 'rgba(200,220,255,1)';
-    ctx.shadowBlur = 25;
-    ctx.strokeStyle = `rgba(235,240,255,${a})`;
-    ctx.lineWidth = 2.5;
-    ctx.beginPath();
-    bolt.pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
-    ctx.stroke();
+    ctx.lineCap = 'round';
+    ctx.shadowColor = 'rgba(170,190,255,0.9)';
+    ctx.shadowBlur = 18;
+    paths.forEach((p, depth) => {
+      ctx.strokeStyle = `rgba(240,244,255,${a * (1 - depth * 0.2)})`;
+      ctx.lineWidth = bolt.w * Math.pow(0.5, depth);
+      ctx.stroke(p);
+    });
     ctx.restore();
   }
 
-  // ---------- Audio (synthesized, no files needed) ----------
+  // ---------- Audio (synthesized from physics, no files) ----------
   let audio = null;
   function createAudio() {
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return null;
     const ac = new AC();
+    const sr = ac.sampleRate;
 
-    const len = ac.sampleRate * 4;
-    const buf = ac.createBuffer(1, len, ac.sampleRate);
-    const data = buf.getChannelData(0);
-    // pink-ish noise
-    let b0 = 0, b1 = 0, b2 = 0;
-    for (let i = 0; i < len; i++) {
-      const w = Math.random() * 2 - 1;
-      b0 = 0.99765 * b0 + w * 0.0990460;
-      b1 = 0.96300 * b1 + w * 0.2965164;
-      b2 = 0.57000 * b2 + w * 1.0526913;
-      data[i] = (b0 + b1 + b2 + w * 0.1848) * 0.18;
+    function noiseBuf(sec, pink) {
+      const buf = ac.createBuffer(1, sr * sec, sr), d = buf.getChannelData(0);
+      let b0 = 0, b1 = 0, b2 = 0;
+      for (let i = 0; i < d.length; i++) {
+        const w = Math.random() * 2 - 1;
+        if (!pink) { d[i] = w * 0.5; continue; }
+        b0 = 0.99765 * b0 + w * 0.0990460;
+        b1 = 0.96300 * b1 + w * 0.2965164;
+        b2 = 0.57000 * b2 + w * 1.0526913;
+        d[i] = (b0 + b1 + b2 + w * 0.1848) * 0.18;
+      }
+      return buf;
+    }
+    const white = noiseBuf(2, false), pink = noiseBuf(4, true);
+
+    const comp = ac.createDynamicsCompressor();
+    comp.threshold.value = -14; comp.ratio.value = 4;
+    const master = ac.createGain();
+    master.connect(comp).connect(ac.destination);
+
+    const loop = buf => { const s = ac.createBufferSource(); s.buffer = buf; s.loop = true; s.start(0, Math.random() * buf.duration); return s; };
+    const filter = (type, freq, Q = 0.7) => { const b = ac.createBiquadFilter(); b.type = type; b.frequency.value = freq; b.Q.value = Q; return b; };
+
+    const bedLP = filter('lowpass', 3000), bedGain = ac.createGain();
+    loop(pink).connect(filter('highpass', 300)).connect(bedLP).connect(bedGain).connect(master);
+    const hissGain = ac.createGain();
+    loop(white).connect(filter('highpass', 5000)).connect(hissGain).connect(master);
+    const windLP = filter('lowpass', 250, 2.5), windGain = ac.createGain();
+    windGain.gain.value = 0;
+    loop(pink).connect(windLP).connect(windGain).connect(master);
+
+    function out(node, pan) {
+      if (ac.createStereoPanner) {
+        const p = ac.createStereoPanner(); p.pan.value = clamp(pan, -1, 1);
+        node.connect(p).connect(master);
+      } else node.connect(master);
     }
 
-    const master = ac.createGain();
-    master.connect(ac.destination);
-
-    const src = ac.createBufferSource();
-    src.buffer = buf; src.loop = true;
-    const hp = ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 400;
-    const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 6000;
-    const rainGain = ac.createGain();
-    src.connect(hp).connect(lp).connect(rainGain).connect(master);
-    src.start();
-
-    function thunder(delay) {
-      const t = ac.currentTime + delay;
-      const s = ac.createBufferSource();
-      s.buffer = buf;
-      const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 180;
+    // A drop hitting a puddle traps a small air bubble that rings at its
+    // Minnaert resonance: f ≈ 3.26 / a (a = bubble radius in m) — the "plink" of rain
+    function plink() {
+      const a = 0.4 + Math.random() ** 2 * 1.1;   // mm
+      const fr = 3260 / a;
+      const t = ac.currentTime + Math.random() * 0.02;
+      const o = ac.createOscillator();
+      o.frequency.setValueAtTime(fr, t);
+      o.frequency.exponentialRampToValueAtTime(fr * 1.25, t + 0.04);
       const g = ac.createGain();
-      g.gain.setValueAtTime(0, t);
-      g.gain.linearRampToValueAtTime(3.5, t + 0.08);
-      g.gain.exponentialRampToValueAtTime(0.001, t + 3.5);
-      s.connect(f).connect(g).connect(master);
-      s.start(t, Math.random() * 2); s.stop(t + 4);
+      const amp = 0.012 + Math.random() * 0.045, dur = 0.02 + a * 0.02;
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(amp, t + 0.002);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g); out(g, Math.random() * 1.6 - 0.8);
+      o.start(t); o.stop(t + dur + 0.02);
+    }
+
+    let tickBudget = 0, lastTick = 0;
+    function tick(D, pan) {
+      const t = ac.currentTime;
+      tickBudget = Math.max(0, tickBudget - (t - lastTick) * 25); lastTick = t;
+      if (tickBudget > 6) return;
+      tickBudget++;
+      const s = ac.createBufferSource(); s.buffer = white;
+      const g = ac.createGain();
+      g.gain.setValueAtTime(Math.min(0.5, 0.05 * D * D), t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.03 + 0.01 * D);
+      s.connect(filter('bandpass', 1500 + 4000 / D, 1.2)).connect(g);
+      out(g, pan);
+      s.start(t, Math.random() * 1.5, 0.1);
+    }
+
+    // Thunder arrives after d / 343 s; air absorbs high frequencies with distance,
+    // and the long channel makes a rumble instead of a single bang
+    function thunder(d) {
+      const t0 = ac.currentTime + d / SOUND_SPEED;
+      const dur = 2 + d / 1500 + Math.random() * 1.5;
+      const amp = Math.min(1.6, 700 / d);
+      const s = loop(pink);
+      const g = ac.createGain();
+      g.gain.setValueAtTime(0.0001, ac.currentTime);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(amp, t0 + (d < 1200 ? 0.03 : 0.3));
+      const n = 3 + (Math.random() * 4 | 0), step = dur * 0.7 / (n + 1);
+      for (let i = 0; i < n; i++) {
+        g.gain.exponentialRampToValueAtTime(amp * (0.25 + Math.random() * 0.6) * (1 - i / n * 0.5),
+          t0 + 0.3 + (i + 1) * step + Math.random() * step * 0.4);
+      }
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      s.connect(filter('lowpass', clamp(250000 / d, 90, 1200))).connect(g).connect(master);
+      s.stop(t0 + dur + 0.1);
+      if (d < 1500) {
+        const c = ac.createBufferSource(); c.buffer = white;
+        const cg = ac.createGain();
+        cg.gain.setValueAtTime(amp * 0.7, t0);
+        cg.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.3);
+        c.connect(filter('highpass', 800)).connect(cg).connect(master);
+        c.start(t0, 0, 0.4);
+      }
     }
 
     function update() {
-      const now = ac.currentTime;
+      const now = ac.currentTime, r = Math.min(1, Math.sqrt(state.rate / 60)), u = Math.abs(state.wind);
       master.gain.setTargetAtTime(state.volume, now, 0.1);
-      rainGain.gain.setTargetAtTime(0.15 + state.intensity * 1.1, now, 0.3);
-      lp.frequency.setTargetAtTime(2500 + state.intensity * 6000, now, 0.3);
+      bedGain.gain.setTargetAtTime((0.1 + 0.9 * r) * (state.glass ? 0.8 : 1), now, 0.3);
+      bedLP.frequency.setTargetAtTime((state.glass ? 1200 : 1800) + 4000 * r, now, 0.3);
+      hissGain.gain.setTargetAtTime((0.02 + 0.15 * r) * (state.glass ? 0.5 : 1), now, 0.3);
+      windGain.gain.setTargetAtTime(Math.min(1.2, (u / 12) ** 2 * 1.2), now, 0.2);
+      windLP.frequency.setTargetAtTime(150 + u * 25, now, 0.2);
     }
     update();
-    return { ac, thunder, update };
+    return { ac, plink, tick, thunder, update };
+  }
+
+  // ---------- Resize ----------
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    trail.width = canvas.width; trail.height = canvas.height;
+    tctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    B = Math.ceil(Math.hypot(W, H)) + 8;
+    ox = (B - W) / 2; oy = (B - H) / 2;
+    f = 0.62 * Math.hypot(W, H);
+    cx = W / 2; cy = H * 0.42;
+    paintBackground();
+    initPinGrid();
+    drops.length = 0; splashes.length = 0; ripples.length = 0;
+    glassDrops.length = 0; seedGlass();
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------- Tilt: real gravity from the accelerometer ----------
+  const rawG = { x: 0, y: G };
+  let gSign = 0;
+  window.addEventListener('devicemotion', e => {
+    if (!state.tilt) return;
+    const a = e.accelerationIncludingGravity;
+    if (!a || a.x == null) return;
+    const ang = ((screen.orientation && screen.orientation.angle) ?? window.orientation ?? 0) * Math.PI / 180;
+    const sx = a.x * Math.cos(ang) - a.y * Math.sin(ang);
+    const sy = a.x * Math.sin(ang) + a.y * Math.cos(ang);
+    // browsers disagree on the sign convention; calibrate assuming the phone starts roughly upright
+    if (!gSign && Math.abs(sy) > 3) gSign = sy > 0 ? 1 : -1;
+    const s = gSign || 1;
+    rawG.x = -s * sx; rawG.y = s * sy;
+  });
+
+  function updateGravity(dt) {
+    const k = Math.min(1, dt * 8);
+    let tx = 0, ty = 1, tip = 1;
+    if (state.tilt) {
+      const m = Math.hypot(rawG.x, rawG.y);
+      tip = Math.min(1, m / G);
+      if (m > 2.5) { tx = rawG.x / m; ty = rawG.y / m; } else { tx = state.gx; ty = state.gy; }
+    }
+    state.gip += (tip - state.gip) * k;
+    state.gx += (tx - state.gx) * k; state.gy += (ty - state.gy) * k;
+    const m = Math.hypot(state.gx, state.gy) || 1;
+    state.gx /= m; state.gy /= m;
+    state.theta = Math.atan2(-state.gx, state.gy);
   }
 
   // ---------- Loop ----------
-  let last = performance.now();
-  let nextAutoBolt = 8 + Math.random() * 15;
+  const hud = document.getElementById('hud');
+  const statsEl = document.getElementById('stats');
+  let last = performance.now(), time = 0, nextAutoBolt = 10, plinkAcc = 0, audioT = 0, statsT = 0;
+
   function frame(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
-    last = now;
+    last = now; time += dt;
 
-    if (state.intensity > 0.75) {
+    const gustAmp = 0.25 * Math.abs(state.wind0) + 0.3;
+    state.wind = state.wind0 + gustAmp * (0.6 * Math.sin(0.53 * time) + 0.3 * Math.sin(1.7 * time + 1.3) + 0.2 * Math.sin(3.1 * time + 0.4));
+
+    if (state.rate > 25) {
       nextAutoBolt -= dt;
-      if (nextAutoBolt <= 0) { lightning(); nextAutoBolt = 6 + Math.random() * 18; }
+      if (nextAutoBolt <= 0) { lightning(); nextAutoBolt = 5 + Math.random() * 20 * (60 / state.rate); }
     }
-    state.flash = Math.max(0, state.flash - dt * 3);
 
+    updateGravity(dt);
+    updateFlash(dt);
     updateRain(dt);
     updateGlass(dt);
 
-    drawBackground();
-    drawBolt(dt);
-    drawRain();
-    drawGlass();
+    if (audio) {
+      plinkAcc += dt * Math.min(35, 1.5 * Math.pow(state.rate, 0.7)) * (state.glass ? 0.5 : 1);
+      while (plinkAcc >= 1) { if (Math.random() < 0.9) audio.plink(); plinkAcc--; }
+      audioT += dt;
+      if (audioT > 0.1) { audio.update(); audioT = 0; }
+    }
 
+    render();
+
+    statsT += dt;
+    if (statsT > 0.25) { updateStats(); statsT = 0; }
     requestAnimationFrame(frame);
   }
+
+  function render() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.save();
+    if (state.theta) {
+      ctx.translate(W / 2, H / 2); ctx.rotate(state.theta); ctx.translate(-W / 2, -H / 2);
+    }
+    ctx.drawImage(state.glass ? bgBlur : bgSharp, -ox, -oy, B, B);
+    // heavy rain scatters light: visibility drops as the rain rate rises
+    ctx.fillStyle = `rgba(55,60,75,${(0.28 * (1 - Math.exp(-state.rate / 40))).toFixed(3)})`;
+    ctx.fillRect(-ox, -oy, B, B);
+    drawBolt();
+    drawRain();
+    ctx.restore();
+
+    drawGlass();
+
+    if (flashLevel > 0.005) {
+      const fl = Math.min(1.2, flashLevel);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const gr = ctx.createLinearGradient(0, 0, 0, H);
+      gr.addColorStop(0, `rgba(150,160,210,${fl * 0.5})`);
+      gr.addColorStop(0.45, `rgba(150,160,210,${fl * 0.3})`);
+      gr.addColorStop(1, `rgba(120,130,170,${fl * 0.12})`);
+      ctx.fillStyle = gr;
+      ctx.fillRect(0, 0, W, H);
+      ctx.restore();
+    }
+  }
+
+  function updateStats() {
+    const R = state.rate, L = mpLambda(R), meanD = 0.5 + 1 / L;
+    statsEl.innerHTML =
+      `降水強度 ${R.toFixed(1)} mm/h（${rainClass(R)}）・風速 ${state.wind.toFixed(1)} m/s<br>` +
+      `平均雨滴径 ${meanD.toFixed(2)} mm・終端速度 ${termVel(meanD).toFixed(1)} m/s・` +
+      `描画中の雨滴 ${drops.length} / 窓 ${glassDrops.length}`;
+    if (thunderInfo) {
+      const el = (performance.now() - thunderInfo.t0) / 1000, eta = thunderInfo.d / SOUND_SPEED;
+      const km = (thunderInfo.d / 1000).toFixed(1);
+      if (el < eta) hud.textContent = `⚡ ${km} km 先に落雷 — 雷鳴まで ${(eta - el).toFixed(1)} 秒`;
+      else if (el < eta + 3) hud.textContent = `⚡ ${km} km — ゴロゴロ…`;
+      else thunderInfo = null;
+      hud.style.opacity = thunderInfo ? 1 : 0;
+    }
+  }
+
   requestAnimationFrame(frame);
 
   // ---------- UI ----------
   const $ = id => document.getElementById(id);
   const panel = $('panel');
 
-  function bindSlider(id, apply) {
+  function bindSlider(id, apply, fmt) {
     const el = $(id), val = $(id + 'Val');
-    const sync = () => { val.textContent = el.value; apply(+el.value); if (audio) audio.update(); };
+    const sync = () => { apply(+el.value); val.textContent = fmt(); if (audio) audio.update(); };
     el.addEventListener('input', sync);
     sync();
     return el;
   }
-  bindSlider('intensity', v => state.intensity = v / 100);
-  const windSlider = bindSlider('wind', v => state.wind = v / 100);
-  bindSlider('volume', v => state.volume = v / 100);
+  bindSlider('rate', v => state.rate = rateFromSlider(v), () => `${state.rate.toFixed(1)} mm/h`);
+  const windSlider = bindSlider('wind', v => state.wind0 = v / 10, () => `${state.wind0.toFixed(1)} m/s`);
+  bindSlider('volume', v => state.volume = v / 100, () => `${Math.round(state.volume * 100)}%`);
 
   function setWind(v) {
-    state.wind = Math.max(-1, Math.min(1, v));
-    windSlider.value = Math.round(state.wind * 100);
-    $('windVal').textContent = windSlider.value;
+    state.wind0 = clamp(v, -15, 15);
+    windSlider.value = Math.round(state.wind0 * 10);
+    $('windVal').textContent = `${state.wind0.toFixed(1)} m/s`;
   }
 
   $('startBtn').addEventListener('click', () => {
@@ -392,42 +1029,36 @@
   $('glassBtn').addEventListener('click', e => {
     state.glass = !state.glass;
     e.currentTarget.classList.toggle('on', state.glass);
+    tctx.clearRect(0, 0, W, H);
+    initPinGrid();
+    if (state.glass) seedGlass();
   });
 
   $('thunderBtn').addEventListener('click', () => lightning());
 
-  function onOrientation(e) {
-    if (!state.tilt || e.gamma == null) return;
-    // portrait: gamma = left/right tilt (-90..90)
-    const angle = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
-    const tilt = angle === 90 ? e.beta : angle === -90 || angle === 270 ? -e.beta : e.gamma;
-    setWind(tilt / 40);
-  }
-
   $('tiltBtn').addEventListener('click', async e => {
     const btn = e.currentTarget;
-    if (!state.tilt && typeof DeviceOrientationEvent !== 'undefined' &&
-        typeof DeviceOrientationEvent.requestPermission === 'function') {
+    if (!state.tilt && typeof DeviceMotionEvent !== 'undefined' &&
+        typeof DeviceMotionEvent.requestPermission === 'function') {
       try {
-        const res = await DeviceOrientationEvent.requestPermission();
-        if (res !== 'granted') return;
+        if (await DeviceMotionEvent.requestPermission() !== 'granted') return;
       } catch (_) { return; }
     }
     state.tilt = !state.tilt;
+    gSign = 0;
     btn.classList.toggle('on', state.tilt);
   });
-  window.addEventListener('deviceorientation', onOrientation);
 
-  // Canvas gestures: tap = lightning, horizontal swipe = wind
+  // tap = lightning, horizontal swipe = wind
   let touchStart = null;
   canvas.addEventListener('pointerdown', e => {
-    touchStart = { x: e.clientX, y: e.clientY, wind: state.wind, moved: false };
+    touchStart = { x: e.clientX, wind: state.wind0, moved: false };
   });
   canvas.addEventListener('pointermove', e => {
     if (!touchStart) return;
     const dx = e.clientX - touchStart.x;
     if (Math.abs(dx) > 10) touchStart.moved = true;
-    if (touchStart.moved && !state.tilt) setWind(touchStart.wind + dx / (W * 0.6));
+    if (touchStart.moved) setWind(touchStart.wind + dx / (W * 0.6) * 15);
   });
   canvas.addEventListener('pointerup', e => {
     if (touchStart && !touchStart.moved) lightning(e.clientX);
