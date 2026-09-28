@@ -707,13 +707,13 @@
             vx: side * sp * (0.15 + Math.random() * 0.3), vy: sp * (0.1 + Math.random() * 0.25), vz: c.vz * (0.2 + Math.random() * 0.4),
             D: 1 + Math.random() * 2.5 });
         }
-        if (audio) audio.carSplash(Math.min(1, 6 / Math.hypot(c.x - cam.x, zr)), clamp((c.x - cam.x) / Math.hypot(c.x - cam.x, zr), -1, 1));
+        if (audio) audio.carSplash(Math.min(1, 6 / Math.hypot(c.x - cam.x, zr)), clamp((c.x - cam.x) / Math.hypot(c.x - cam.x, zr), -1, 1), [c.x - cam.x, -cam.y, zr]);
       }
       c.inPuddle = wet;
       if (c.voice) {
         const dx = c.x - cam.x, r = Math.hypot(dx, cam.y, zr);
         const vr = -zr * (c.vz - state.speed) / r;                // closing speed
-        c.voice.set(Math.min(1, 7.5 / r), SOUND_SPEED / (SOUND_SPEED - vr), dx / r * 1.5, r);
+        c.voice.set(Math.min(1, 7.5 / r), SOUND_SPEED / (SOUND_SPEED - vr), dx / r * 1.5, r, [dx, 0.4 - cam.y, zr]);
       }
     }
   }
@@ -781,7 +781,7 @@
       if (st !== p.lastStep) {
         p.lastStep = st;
         const r = Math.hypot(p.x - cam.x, zr);
-        if (audio && r < 9) audio.otherStep(Math.min(1, 1.2 / r), clamp((p.x - cam.x) / r, -1, 1));
+        if (audio && r < 9) audio.otherStep(Math.min(1, 1.2 / r), clamp((p.x - cam.x) / r, -1, 1), [p.x - cam.x, -cam.y, zr]);
       }
     }
     courtesy += (pass * 0.28 - courtesy) * Math.min(1, dt * 3);
@@ -919,7 +919,7 @@
       it.sndT -= dt;
       if (it.sndT <= 0) {
         it.sndT = it.kind === 'cuckoo' ? 1.5 : 0.55;
-        audio.signal(it.kind, Math.min(1, 4 / r), clamp(2 / r, -1, 1));
+        audio.signal(it.kind, Math.min(1, 4 / r), clamp(2 / r, -1, 1), [SIDE_R - 0.2 - cam.x, 2.6 - cam.y, it.zg1 - cam.z]);
       }
     }
   }
@@ -1356,7 +1356,7 @@
         t.V -= TIP_DRIP_V;
         const p = canopyPoint(rimTheta(t.phi), t.phi);
         if (p[2] > 0.05) rimDrops.push({ x: p[0], y: p[1], z: p[2], vy: 0, vx: 0, D: Math.cbrt(6 * TIP_DRIP_V / Math.PI) * 1000, t });
-        if (audio) audio.footDrip(Math.sqrt(2 * (p[1] + cam.y) / G), clamp(p[0] * 2, -1, 1));
+        if (audio) audio.footDrip(Math.sqrt(2 * (p[1] + cam.y) / G), clamp(p[0] * 2, -1, 1), [p[0], -cam.y, p[2]]);
       }
     }
     for (let i = rimDrops.length - 1; i >= 0; i--) {
@@ -1699,6 +1699,26 @@
       if (!ac.createStereoPanner) return dest;
       const p = ac.createStereoPanner(); p.pan.value = clamp(pan, -1, 1); p.connect(dest); return p;
     };
+    // 3D placement with head-related transfer functions (elevation and front/back cues on
+    // headphones). Our frame (x right, y up, z forward) → Web Audio's (x, y, −z). Distance
+    // attenuation is applied by the caller, so the panner only localises.
+    const setPos = (pn, x, y, z) => {
+      if (pn.positionX) { pn.positionX.value = x; pn.positionY.value = y; pn.positionZ.value = -z; }
+      else pn.setPosition(x, y, -z);
+    };
+    const spatial = (pos, dest, pan) => {
+      if (!pos || !ac.createPanner) return panner(pan || 0, dest);
+      const pn = ac.createPanner();
+      pn.panningModel = 'HRTF'; pn.distanceModel = 'inverse'; pn.refDistance = 1; pn.rolloffFactor = 0;
+      setPos(pn, pos[0], pos[1], pos[2]);
+      pn.connect(dest);
+      return pn;
+    };
+    function setListenerYaw(yw) {
+      const L = ac.listener, fx = -Math.sin(yw), fz = -Math.cos(yw);
+      if (L.forwardX) { L.forwardX.value = fx; L.forwardY.value = 0; L.forwardZ.value = fz; L.upX.value = 0; L.upY.value = 1; L.upZ.value = 0; }
+      else if (L.setOrientation) L.setOrientation(fx, 0, fz, 0, 1, 0);
+    }
 
     const comp = ac.createDynamicsCompressor();
     comp.threshold.value = -12; comp.ratio.value = 3;
@@ -1915,9 +1935,9 @@
       k.connect(gainNode(0.3)).connect(verbSend);
     }
     // a drop from a rib tip landing on the wet pavement next to our feet
-    function footDrip(delay, pan) {
+    function footDrip(delay, pan, pos) {
       const t = ac.currentTime + delay;
-      const out = panner(pan, master);
+      const out = spatial(pos, master, pan);
       const f0 = 3260 / (0.9 + rnd() * 1.2);
       const o = ac.createOscillator(), g = ac.createGain();
       o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f0 * 1.3, t + 0.05);
@@ -1930,6 +1950,7 @@
 
     function update() {
       players.forEach(p => p());
+      setListenerYaw(yaw);
       environment(envFacade, cover);
       const now = ac.currentTime, R = state.rateNow, u = Math.abs(state.wind);
       master.gain.setTargetAtTime(state.volume * state.fade, now, 0.1);
@@ -1964,12 +1985,12 @@
     function carVoice() {
       const hiss = loop(white), roll = loop(pink);
       const bp = filter('bandpass', 1600, 0.5), air = filter('lowpass', 8000), g = gainNode(0), g2 = gainNode(0);
-      const out = panner(0, street);
+      const out = spatial([0, 0, 100], street, 0);
       hiss.connect(bp).connect(air).connect(g).connect(out);
       roll.connect(filter('lowpass', 160)).connect(g2).connect(out);
       const pan = out.pan;
       return {
-        set(amp, rate, p, r) {
+        set(amp, rate, p, r, pos) {
           const now = ac.currentTime;
           hiss.playbackRate.setTargetAtTime(rate, now, 0.05);
           roll.playbackRate.setTargetAtTime(rate, now, 0.05);
@@ -1977,6 +1998,7 @@
           g2.gain.setTargetAtTime(0.5 * amp, now, 0.05);
           air.frequency.setTargetAtTime(clamp(16000 * 15 / r, 900, 16000), now, 0.1);
           if (pan) pan.setTargetAtTime(clamp(p, -1, 1), now, 0.05);
+          else if (pos) setPos(out, pos[0], pos[1], pos[2]);
         },
         stop() {
           const now = ac.currentTime;
@@ -2030,20 +2052,20 @@
     }
 
     // someone else's footsteps nearby: the same wet heel strike, quieter and more reverberant
-    function otherStep(amp, pan) {
+    function otherStep(amp, pan, pos) {
       const t = ac.currentTime;
       const s = ac.createBufferSource(), g = ac.createGain();
       s.buffer = white;
       g.gain.setValueAtTime(0.22 * amp, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.06);
-      s.connect(filter('bandpass', 1100, 0.8)).connect(g).connect(panner(pan, street));
+      s.connect(filter('bandpass', 1100, 0.8)).connect(g).connect(spatial(pos, street, pan));
       s.start(t, rnd(), 0.08);
     }
     // audible pedestrian signal: a small horn loudspeaker (strong odd harmonics), heard
     // through the rain and the street reverb
     let cuckooAlt = 0;
-    function signal(kind, amp, pan) {
+    function signal(kind, amp, pan, pos) {
       const t = ac.currentTime;
-      const out = panner(pan, street);
+      const out = spatial(pos, street, pan);
       const note = (t0, f0, f1, dur, a) => {
         const o = ac.createOscillator(), g = ac.createGain();
         o.type = 'triangle';
@@ -2066,8 +2088,8 @@
     // entry chime: a tone generator imitating struck metal bars — each note's partials sit at the
     // free–free bar ratios 1 : 2.76 : 5.40 and decay faster the higher they are; heard from
     // inside the shop through the opening door
-    function chime(pan, r) {
-      const t = ac.currentTime, out = panner(pan, street), amp = Math.min(0.12, 0.25 / r);
+    function chime(pan, r, pos) {
+      const t = ac.currentTime, out = spatial(pos, street, pan), amp = Math.min(0.12, 0.25 / r);
       const lp = filter('lowpass', 3500);
       lp.connect(out);
       [[1319, 0], [1047, 0.42]].forEach(([f0, dt0]) => {
@@ -2082,8 +2104,8 @@
     }
     // the splash of a car through a puddle: a broadband rush of water (the sheet breaking up)
     // with bubbles ringing as it lands
-    function carSplash(amp, pan) {
-      const t = ac.currentTime, out = panner(pan, street);
+    function carSplash(amp, pan, pos) {
+      const t = ac.currentTime, out = spatial(pos, street, pan);
       const s = ac.createBufferSource(), g = ac.createGain();
       s.buffer = pink;
       g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.9 * amp, t + 0.03);
@@ -2175,7 +2197,7 @@
     for (const blk of blocks.values()) for (const b of blk.right) {
       if (!b.shop || !b.shop.konbini) continue;
       const dz = (b.z0 + b.z1) / 2 - cam.z;
-      if (Math.abs(dz) < 12 && Math.random() < dt * 0.12 && audio) audio.chime(clamp(SIDE_R / Math.hypot(SIDE_R, dz), -1, 1), Math.hypot(SIDE_R, dz));
+      if (Math.abs(dz) < 12 && Math.random() < dt * 0.12 && audio) audio.chime(clamp(SIDE_R / Math.hypot(SIDE_R, dz), -1, 1), Math.hypot(SIDE_R, dz), [SIDE_R + 1, 0.5 - cam.y, dz]);
     }
     let vn = 0;
     for (const blk of blocks.values()) if (blk.vend) {
