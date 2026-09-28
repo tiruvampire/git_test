@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Rain">
+<meta name="theme-color" content="#0b1220">
+<title>Rain Simulator</title>
+<style>
+  :root {
+    --panel: rgba(15, 23, 42, 0.72);
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --accent: #7dd3fc;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: #0b1220; color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+    overscroll-behavior: none;
+  }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #start {
+    position: fixed; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 16px;
+    background: rgba(11, 18, 32, 0.6); backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px); z-index: 10; text-align: center; padding: 24px;
+  }
+  #start h1 { margin: 0; font-size: 28px; font-weight: 600; letter-spacing: 0.02em; }
+  #start p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.7; }
+  button {
+    font: inherit; color: var(--text); background: rgba(125, 211, 252, 0.15);
+    border: 1px solid rgba(125, 211, 252, 0.4); border-radius: 999px;
+    padding: 10px 20px; cursor: pointer;
+  }
+  button:active { background: rgba(125, 211, 252, 0.3); }
+  #startBtn { font-size: 17px; padding: 14px 32px; }
+  #panel {
+    position: fixed; left: 12px; right: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    background: var(--panel); border-radius: 18px; padding: 14px 16px;
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    display: grid; gap: 10px; z-index: 5; transition: transform .3s, opacity .3s;
+    max-width: 480px; margin: 0 auto;
+  }
+  #panel.hidden { transform: translateY(calc(100% + 40px)); opacity: 0; pointer-events: none; }
+  .row { display: grid; grid-template-columns: 64px 1fr 40px; align-items: center; gap: 10px; font-size: 13px; }
+  .row span:last-child { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--accent); touch-action: pan-x; }
+  .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+  .buttons button { flex: 1; font-size: 13px; padding: 8px 10px; }
+  button.on { background: rgba(125, 211, 252, 0.35); }
+  #toggle {
+    position: fixed; right: 12px; top: calc(12px + env(safe-area-inset-top));
+    z-index: 6; padding: 8px 14px; font-size: 13px; background: var(--panel);
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="start">
+  <h1>☔ Rain Simulator</h1>
+  <p>タップで雷 ⚡ / スワイプで風向きを変更<br>「傾き」をオンにするとiPhoneを傾けて風を操作できます</p>
+  <button id="startBtn">はじめる（音あり）</button>
+</div>
+
+<button id="toggle">設定</button>
+
+<div id="panel" class="hidden">
+  <div class="row"><span>雨量</span><input id="intensity" type="range" min="0" max="100" value="55"><span id="intensityVal">55</span></div>
+  <div class="row"><span>風</span><input id="wind" type="range" min="-100" max="100" value="10"><span id="windVal">10</span></div>
+  <div class="row"><span>音量</span><input id="volume" type="range" min="0" max="100" value="60"><span id="volumeVal">60</span></div>
+  <div class="buttons">
+    <button id="glassBtn" class="on">窓ガラス</button>
+    <button id="tiltBtn">傾き</button>
+    <button id="thunderBtn">雷</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  let W = 0, H = 0, DPR = 1;
+
+  const state = {
+    intensity: 0.55,   // 0..1
+    wind: 0.1,         // -1..1
+    volume: 0.6,
+    glass: true,
+    tilt: false,
+    flash: 0,          // lightning brightness 0..1
+  };
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth; H = window.innerHeight;
+    canvas.width = W * DPR; canvas.height = H * DPR;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ---------- Falling rain ----------
+  const MAX_DROPS = 900;
+  const drops = [];
+  const splashes = [];
+
+  function spawnDrop(anywhere) {
+    const z = Math.random();              // depth: 0 = far, 1 = near
+    const speed = 500 + z * 900;          // px/s
+    return {
+      x: Math.random() * (W + 400) - 200,
+      y: anywhere ? Math.random() * H : -Math.random() * 100 - 20,
+      z, speed,
+      len: 8 + z * 22,
+    };
+  }
+
+  function updateRain(dt) {
+    const target = Math.floor(MAX_DROPS * state.intensity * (W * H) / (390 * 844));
+    const cap = Math.min(target, 1600);
+    while (drops.length < cap) drops.push(spawnDrop(drops.length === 0));
+    if (drops.length > cap) drops.length = cap;
+
+    const windPx = state.wind * 600;
+    for (let i = 0; i < drops.length; i++) {
+      const d = drops[i];
+      d.x += windPx * dt * (0.5 + d.z * 0.5);
+      d.y += d.speed * dt;
+      if (d.y > H - 4 - (1 - d.z) * 30) {
+        if (d.z > 0.35 && splashes.length < 400) {
+          const n = 2 + (Math.random() * 3 | 0);
+          for (let k = 0; k < n; k++) {
+            splashes.push({
+              x: d.x, y: d.y,
+              vx: (Math.random() - 0.5) * 160 + windPx * 0.2,
+              vy: -Math.random() * 180 - 60,
+              life: 0.35 + Math.random() * 0.2, age: 0, z: d.z,
+            });
+          }
+        }
+        drops[i] = spawnDrop(false);
+      } else if (d.x < -250 || d.x > W + 250) {
+        drops[i] = spawnDrop(false);
+      }
+    }
+    for (let i = splashes.length - 1; i >= 0; i--) {
+      const s = splashes[i];
+      s.age += dt;
+      s.vy += 900 * dt;
+      s.x += s.vx * dt; s.y += s.vy * dt;
+      if (s.age > s.life) splashes.splice(i, 1);
+    }
+  }
+
+  function drawRain() {
+    const windPx = state.wind * 600;
+    ctx.lineCap = 'round';
+    for (const d of drops) {
+      const dx = (windPx * (0.5 + d.z * 0.5)) / d.speed * d.len;
+      ctx.strokeStyle = `rgba(180, 205, 235, ${0.15 + d.z * 0.45})`;
+      ctx.lineWidth = 0.6 + d.z * 1.2;
+      ctx.beginPath();
+      ctx.moveTo(d.x, d.y);
+      ctx.lineTo(d.x - dx, d.y - d.len);
+      ctx.stroke();
+    }
+    ctx.fillStyle = 'rgba(190, 215, 240, 0.6)';
+    for (const s of splashes) {
+      const r = (1 - s.age / s.life) * (0.8 + s.z);
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // ---------- Drops on window glass ----------
+  const glassDrops = [];
+  function updateGlass(dt) {
+    if (!state.glass) { glassDrops.length = 0; return; }
+    const spawnRate = 25 * state.intensity;
+    if (Math.random() < spawnRate * dt && glassDrops.length < 140) {
+      glassDrops.push({
+        x: Math.random() * W, y: Math.random() * H,
+        r: 1.5 + Math.random() * 4, vy: 0, moving: false,
+      });
+    }
+    for (let i = glassDrops.length - 1; i >= 0; i--) {
+      const g = glassDrops[i];
+      if (!g.moving && g.r > 4.2 && Math.random() < 0.4 * dt) g.moving = true;
+      if (g.moving) {
+        g.vy = Math.min(g.vy + 200 * dt, 60 + g.r * 25);
+        g.y += g.vy * dt * (0.6 + Math.random() * 0.8);
+        g.x += state.wind * 20 * dt + (Math.random() - 0.5) * 0.6;
+        g.r -= 0.12 * dt;  // leaves a trail, shrinks slightly
+      }
+      // merge with nearby drops
+      for (let j = i - 1; j >= 0; j--) {
+        const o = glassDrops[j];
+        const dx = o.x - g.x, dy = o.y - g.y;
+        if (dx * dx + dy * dy < (g.r + o.r) * (g.r + o.r) * 0.6) {
+          g.r = Math.sqrt(g.r * g.r + o.r * o.r);
+          g.moving = g.moving || o.moving;
+          glassDrops.splice(j, 1); i--;
+        }
+      }
+      if (g.y - g.r > H || g.r < 0.8) glassDrops.splice(glassDrops.indexOf(g), 1);
+    }
+  }
+
+  function drawGlass() {
+    for (const g of glassDrops) {
+      const grad = ctx.createRadialGradient(g.x - g.r * 0.3, g.y - g.r * 0.4, g.r * 0.1, g.x, g.y, g.r);
+      grad.addColorStop(0, 'rgba(255,255,255,0.55)');
+      grad.addColorStop(0.5, 'rgba(160,190,225,0.18)');
+      grad.addColorStop(1, 'rgba(20,30,50,0.35)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.ellipse(g.x, g.y, g.r, g.r * (g.moving ? 1.25 : 1), 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // ---------- Background & lightning ----------
+  let bolt = null;
+  function makeBolt(x) {
+    const pts = [{ x, y: 0 }];
+    let cx = x, cy = 0;
+    while (cy < H * (0.5 + Math.random() * 0.35)) {
+      cx += (Math.random() - 0.5) * 70;
+      cy += 20 + Math.random() * 40;
+      pts.push({ x: cx, y: cy });
+    }
+    return { pts, age: 0 };
+  }
+
+  function lightning(x) {
+    state.flash = 1;
+    bolt = makeBolt(x ?? Math.random() * W);
+    if (audio) audio.thunder(0.4 + Math.random() * 1.4);
+    if (navigator.vibrate) navigator.vibrate(30);
+  }
+
+  function drawBackground() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    const f = state.flash;
+    const dark = 1 - state.intensity * 0.4;
+    g.addColorStop(0, `rgb(${18 * dark + f * 150 | 0}, ${26 * dark + f * 160 | 0}, ${44 * dark + f * 180 | 0})`);
+    g.addColorStop(1, `rgb(${8 + f * 60 | 0}, ${12 + f * 70 | 0}, ${22 + f * 90 | 0})`);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    // wet ground reflection band
+    const gg = ctx.createLinearGradient(0, H - 60, 0, H);
+    gg.addColorStop(0, 'rgba(120,150,190,0)');
+    gg.addColorStop(1, `rgba(120,150,190,${0.08 + f * 0.3})`);
+    ctx.fillStyle = gg;
+    ctx.fillRect(0, H - 60, W, 60);
+  }
+
+  function drawBolt(dt) {
+    if (!bolt) return;
+    bolt.age += dt;
+    const a = Math.max(0, 1 - bolt.age / 0.35);
+    if (a <= 0) { bolt = null; return; }
+    ctx.save();
+    ctx.shadowColor = 'rgba(200,220,255,1)';
+    ctx.shadowBlur = 25;
+    ctx.strokeStyle = `rgba(235,240,255,${a})`;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    bolt.pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ---------- Audio (synthesized, no files needed) ----------
+  let audio = null;
+  function createAudio() {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    const ac = new AC();
+
+    const len = ac.sampleRate * 4;
+    const buf = ac.createBuffer(1, len, ac.sampleRate);
+    const data = buf.getChannelData(0);
+    // pink-ish noise
+    let b0 = 0, b1 = 0, b2 = 0;
+    for (let i = 0; i < len; i++) {
+      const w = Math.random() * 2 - 1;
+      b0 = 0.99765 * b0 + w * 0.0990460;
+      b1 = 0.96300 * b1 + w * 0.2965164;
+      b2 = 0.57000 * b2 + w * 1.0526913;
+      data[i] = (b0 + b1 + b2 + w * 0.1848) * 0.18;
+    }
+
+    const master = ac.createGain();
+    master.connect(ac.destination);
+
+    const src = ac.createBufferSource();
+    src.buffer = buf; src.loop = true;
+    const hp = ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 400;
+    const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 6000;
+    const rainGain = ac.createGain();
+    src.connect(hp).connect(lp).connect(rainGain).connect(master);
+    src.start();
+
+    function thunder(delay) {
+      const t = ac.currentTime + delay;
+      const s = ac.createBufferSource();
+      s.buffer = buf;
+      const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 180;
+      const g = ac.createGain();
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(3.5, t + 0.08);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 3.5);
+      s.connect(f).connect(g).connect(master);
+      s.start(t, Math.random() * 2); s.stop(t + 4);
+    }
+
+    function update() {
+      const now = ac.currentTime;
+      master.gain.setTargetAtTime(state.volume, now, 0.1);
+      rainGain.gain.setTargetAtTime(0.15 + state.intensity * 1.1, now, 0.3);
+      lp.frequency.setTargetAtTime(2500 + state.intensity * 6000, now, 0.3);
+    }
+    update();
+    return { ac, thunder, update };
+  }
+
+  // ---------- Loop ----------
+  let last = performance.now();
+  let nextAutoBolt = 8 + Math.random() * 15;
+  function frame(now) {
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+
+    if (state.intensity > 0.75) {
+      nextAutoBolt -= dt;
+      if (nextAutoBolt <= 0) { lightning(); nextAutoBolt = 6 + Math.random() * 18; }
+    }
+    state.flash = Math.max(0, state.flash - dt * 3);
+
+    updateRain(dt);
+    updateGlass(dt);
+
+    drawBackground();
+    drawBolt(dt);
+    drawRain();
+    drawGlass();
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ---------- UI ----------
+  const $ = id => document.getElementById(id);
+  const panel = $('panel');
+
+  function bindSlider(id, apply) {
+    const el = $(id), val = $(id + 'Val');
+    const sync = () => { val.textContent = el.value; apply(+el.value); if (audio) audio.update(); };
+    el.addEventListener('input', sync);
+    sync();
+    return el;
+  }
+  bindSlider('intensity', v => state.intensity = v / 100);
+  const windSlider = bindSlider('wind', v => state.wind = v / 100);
+  bindSlider('volume', v => state.volume = v / 100);
+
+  function setWind(v) {
+    state.wind = Math.max(-1, Math.min(1, v));
+    windSlider.value = Math.round(state.wind * 100);
+    $('windVal').textContent = windSlider.value;
+  }
+
+  $('startBtn').addEventListener('click', () => {
+    audio = createAudio();
+    if (audio && audio.ac.state === 'suspended') audio.ac.resume();
+    $('start').remove();
+  });
+
+  $('toggle').addEventListener('click', () => panel.classList.toggle('hidden'));
+
+  $('glassBtn').addEventListener('click', e => {
+    state.glass = !state.glass;
+    e.currentTarget.classList.toggle('on', state.glass);
+  });
+
+  $('thunderBtn').addEventListener('click', () => lightning());
+
+  function onOrientation(e) {
+    if (!state.tilt || e.gamma == null) return;
+    // portrait: gamma = left/right tilt (-90..90)
+    const angle = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+    const tilt = angle === 90 ? e.beta : angle === -90 || angle === 270 ? -e.beta : e.gamma;
+    setWind(tilt / 40);
+  }
+
+  $('tiltBtn').addEventListener('click', async e => {
+    const btn = e.currentTarget;
+    if (!state.tilt && typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try {
+        const res = await DeviceOrientationEvent.requestPermission();
+        if (res !== 'granted') return;
+      } catch (_) { return; }
+    }
+    state.tilt = !state.tilt;
+    btn.classList.toggle('on', state.tilt);
+  });
+  window.addEventListener('deviceorientation', onOrientation);
+
+  // Canvas gestures: tap = lightning, horizontal swipe = wind
+  let touchStart = null;
+  canvas.addEventListener('pointerdown', e => {
+    touchStart = { x: e.clientX, y: e.clientY, wind: state.wind, moved: false };
+  });
+  canvas.addEventListener('pointermove', e => {
+    if (!touchStart) return;
+    const dx = e.clientX - touchStart.x;
+    if (Math.abs(dx) > 10) touchStart.moved = true;
+    if (touchStart.moved && !state.tilt) setWind(touchStart.wind + dx / (W * 0.6));
+  });
+  canvas.addEventListener('pointerup', e => {
+    if (touchStart && !touchStart.moved) lightning(e.clientX);
+    touchStart = null;
+  });
+  canvas.addEventListener('pointercancel', () => touchStart = null);
+
+  // iOS suspends audio when the app goes to background
+  document.addEventListener('visibilitychange', () => {
+    if (!audio) return;
+    if (document.hidden) audio.ac.suspend(); else audio.ac.resume();
+  });
+})();
+</script>
+</body>
+</html>
