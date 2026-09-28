@@ -105,7 +105,10 @@
   const EXPOSURE = 0.03;          // s — motion-blur time of the eye/camera
   const APERTURE = 0.004;         // m — lens/pupil diameter (depth-of-field blur)
   const PX_PER_MM = 6.3;          // scale of the window glass (≈ true size on an iPhone screen)
-  const A_C = 1.6;                // mm — contact radius at which a drop starts sliding on vertical glass
+  // Furmidge: a drop slides when ρ·V·g > 2a·σ·(cosθr − cosθa). With V = ⅔πa³ the critical
+  // contact radius is a_c = √(3σΔ / πρg); Δ = 0.36 is typical contact-angle hysteresis on window glass
+  const HYST = 0.36;
+  const A_C = Math.sqrt(3 * 0.072 * HYST / (Math.PI * 1000 * 9.81)) * 1000;   // ≈ 1.6 mm
   const LENS = 6;                 // field of view magnification of a drop acting as a ball lens
   const PC = 6;                   // px — cell size of the glass pinning grid
 
@@ -609,7 +612,7 @@
   }
 
   function makeGlassDrop(x, y, V) {
-    const d = { x, y, V, a: 0, r: 0, moving: false, speed: 0, steer: 0, dep: 0, depT: 0.05 + Math.random() * 0.2, fresh: true };
+    const d = { x, y, V, a: 0, r: 0, moving: false, speed: 0, steer: 0, dep: 0, depT: 0.05 + Math.random() * 0.2, fresh: true, spread: 0 };
     setDropVolume(d);
     return d;
   }
@@ -633,14 +636,18 @@
     const x = Math.random() * W, y = Math.random() * H;
     if (D > 2.5) {
       // large drops shatter on impact into a main drop plus satellites
-      glassDrops.push(makeGlassDrop(x, y, V * 0.6));
+      const main = makeGlassDrop(x, y, V * 0.6);
+      main.spread = 1;
+      glassDrops.push(main);
       const n = 3 + (Math.random() * 4 | 0);
       for (let k = 0; k < n; k++) {
         const ang = Math.random() * TAU, dist = D * PX_PER_MM * (1 + Math.random() * 2.5);
         glassDrops.push(makeGlassDrop(x + Math.cos(ang) * dist, y + Math.sin(ang) * dist, V * 0.4 / n));
       }
     } else {
-      glassDrops.push(makeGlassDrop(x, y, V));
+      const d = makeGlassDrop(x, y, V);
+      d.spread = D > 1 ? 1 : 0;
+      glassDrops.push(d);
     }
     if (audio) audio.tick(D, x / W * 1.6 - 0.8);
   }
@@ -670,7 +677,10 @@
       const q = d.a * d.a * state.gip / (A_C * A_C * pin);
       if (q > 1) {
         d.moving = true;
-        d.speed = Math.min(250, 10 + 40 * (q - 1)) * PX_PER_MM;
+        // viscous dissipation at the moving contact line: Ca = μU/σ ∝ (F − F_c),
+        // U ≈ σΔ/(μ·C)·(q − 1) with C ≈ 60 (log cut-off / θ³ factor)
+        const target = Math.min(200, 3 + 0.072 * HYST / (0.001 * 60) * 1000 * (q - 1)) * PX_PER_MM;
+        d.speed += (target - d.speed) * Math.min(1, dt / 0.06);
         const off = d.r * 1.3 + 3;
         const pl = pinAt(d.x + (px + gx) * off, d.y + (py + gy) * off);
         const pr = pinAt(d.x + (-px + gx) * off, d.y + (-py + gy) * off);
@@ -681,7 +691,7 @@
         const x0 = d.x, y0 = d.y;
         d.x += dx * ds; d.y += dy * ds;
         wetPath(d.x, d.y, d.r);
-        tctx.strokeStyle = 'rgba(150,180,220,0.045)';
+        tctx.strokeStyle = 'rgba(140,160,190,0.022)';
         tctx.lineWidth = d.r * 1.2;
         tctx.beginPath(); tctx.moveTo(x0, y0); tctx.lineTo(d.x, d.y); tctx.stroke();
 
@@ -700,6 +710,7 @@
       } else {
         d.moving = false; d.speed = 0;
       }
+      if (d.spread > 0) d.spread = Math.max(0, d.spread - dt / 0.08);
       d.V -= dt * 0.0004 * d.a;    // slow evaporation
       if (d.V < 0.004) d.dead = true;
       else setDropVolume(d);
@@ -711,7 +722,7 @@
     trailFadeT += dt;
     if (trailFadeT > 0.5) {
       tctx.globalCompositeOperation = 'destination-out';
-      tctx.fillStyle = 'rgba(0,0,0,0.05)';
+      tctx.fillStyle = 'rgba(0,0,0,0.09)';
       tctx.fillRect(0, 0, W, H);
       tctx.globalCompositeOperation = 'source-over';
       trailFadeT = 0;
@@ -763,14 +774,19 @@
   const shade = (() => {
     const c = mkCanvas(128, 128), s = c.getContext('2d');
     let gr = s.createRadialGradient(64, 72, 8, 64, 64, 64);
-    gr.addColorStop(0, 'rgba(255,255,255,0.10)');
-    gr.addColorStop(0.55, 'rgba(0,0,0,0)');
-    gr.addColorStop(0.82, 'rgba(0,0,0,0.28)');
-    gr.addColorStop(1, 'rgba(0,0,0,0.65)');
+    // total internal reflection darkens the rim; light focused by the drop brightens the lower edge
+    gr.addColorStop(0, 'rgba(255,255,255,0.08)');
+    gr.addColorStop(0.6, 'rgba(0,0,0,0)');
+    gr.addColorStop(0.86, 'rgba(0,0,0,0.16)');
+    gr.addColorStop(1, 'rgba(0,0,0,0.36)');
     s.fillStyle = gr; s.beginPath(); s.arc(64, 64, 64, 0, TAU); s.fill();
-    gr = s.createRadialGradient(64, 102, 0, 64, 102, 26);
-    gr.addColorStop(0, 'rgba(255,240,220,0.2)'); gr.addColorStop(1, 'rgba(255,240,220,0)');
-    s.fillStyle = gr; s.beginPath(); s.arc(64, 102, 26, 0, TAU); s.fill();
+    s.save();
+    s.beginPath(); s.arc(64, 64, 63, 0, TAU); s.clip();
+    gr = s.createRadialGradient(64, 64, 50, 64, 64, 66);
+    gr.addColorStop(0, 'rgba(255,235,210,0)'); gr.addColorStop(0.6, 'rgba(255,235,210,0.28)'); gr.addColorStop(1, 'rgba(255,235,210,0)');
+    s.fillStyle = gr;
+    s.beginPath(); s.moveTo(64, 64); s.arc(64, 64, 66, 0.2 * Math.PI, 0.8 * Math.PI); s.closePath(); s.fill();
+    s.restore();
     gr = s.createRadialGradient(48, 34, 0, 48, 34, 16);
     gr.addColorStop(0, 'rgba(255,255,255,0.85)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
     s.fillStyle = gr; s.beginPath(); s.arc(48, 34, 16, 0, TAU); s.fill();
@@ -789,8 +805,11 @@
         small.arc(d.x, d.y, d.r, 0, TAU);
         continue;
       }
-      const e = d.moving ? Math.min(0.35, d.speed / (PX_PER_MM * 300)) : 0;
-      const rx = d.r * (1 - e * 0.3), ry = d.r * (1 + e);
+      // sliding drops: round advancing head, receding tail stretched behind (teardrop);
+      // fresh impacts are still spread out (β_max ≈ 1.6) and recoil within ~80 ms
+      const e = d.moving ? Math.min(0.6, d.speed / (PX_PER_MM * 120)) : 0;
+      const sp = 1 + 0.6 * d.spread;
+      const rx = d.r * (1 - e * 0.15) * sp, ry = d.r * sp;
       // where this point of the glass looks at in the (rotated) background
       const dx = d.x - W / 2, dy = d.y - H / 2;
       const bx = cosT * dx + sinT * dy + B / 2, by = -sinT * dx + cosT * dy + B / 2;
@@ -798,16 +817,31 @@
       const sx = clamp((B - bx) * fs - s / 2, 0, bgFlip.width - s);
       const sy = clamp((B - by) * fs - s / 2, 0, bgFlip.height - s);
       ctx.save();
-      ctx.beginPath();
-      ctx.ellipse(d.x, d.y, rx, ry, rot, 0, TAU);
-      ctx.clip();
-      ctx.drawImage(bgFlip, sx, sy, s, s, d.x - ry, d.y - ry, ry * 2, ry * 2);
       ctx.translate(d.x, d.y);
       ctx.rotate(rot);
-      ctx.drawImage(shade, -rx, -ry, rx * 2, ry * 2);
+      ctx.beginPath();
+      const tail = ry * (1 + 1.6 * e);
+      if (e > 0.02) {
+        // +y points along gravity: head at +y, tail toward −y
+        ctx.moveTo(-rx, 0);
+        ctx.arc(0, 0, rx, Math.PI, 0, true);
+        ctx.bezierCurveTo(rx, -tail * 0.45, rx * 0.25, -tail * 0.85, 0, -tail);
+        ctx.bezierCurveTo(-rx * 0.25, -tail * 0.85, -rx, -tail * 0.45, -rx, 0);
+      } else {
+        ctx.ellipse(0, 0, rx, ry, 0, 0, TAU);
+      }
+      ctx.clip();
+      ctx.rotate(-rot);
+      const R = Math.max(rx, tail);
+      ctx.drawImage(bgFlip, sx, sy, s, s, -R, -R, R * 2, R * 2);
+      ctx.fillStyle = hazeStyle;              // the drop sees the same rain-scattered light as we do
+      ctx.fillRect(-R, -R, R * 2, R * 2);
+      ctx.rotate(rot);
+      ctx.globalAlpha = 1 - 0.5 * d.spread;
+      ctx.drawImage(shade, -rx, -tail, rx * 2, ry + tail);
       ctx.restore();
     }
-    ctx.fillStyle = 'rgba(8,12,20,0.32)';
+    ctx.fillStyle = 'rgba(8,12,20,0.2)';
     ctx.fill(small);
   }
 
@@ -1087,6 +1121,7 @@
     requestAnimationFrame(frame);
   }
 
+  let hazeStyle = 'rgba(0,0,0,0)';
   function render() {
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     ctx.save();
@@ -1095,7 +1130,8 @@
     }
     ctx.drawImage(state.glass ? bgBlur : bgSharp, -ox, -oy, B, B);
     // heavy rain scatters light: visibility drops as the rain rate rises
-    ctx.fillStyle = `rgba(55,60,75,${(0.28 * (1 - Math.exp(-state.rateNow / 40))).toFixed(3)})`;
+    hazeStyle = `rgba(55,60,75,${(0.28 * (1 - Math.exp(-state.rateNow / 40))).toFixed(3)})`;
+    ctx.fillStyle = hazeStyle;
     ctx.fillRect(-ox, -oy, B, B);
     drawBolt();
     drawRain();
