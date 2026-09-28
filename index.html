@@ -521,7 +521,7 @@
 
   // stroke batching: bucket by tint, alpha and width so thousands of streaks cost a few dozen draw calls
   const AB = 7, AMAX = 0.85, WB = 5, WREP = [0.6, 1.1, 1.9, 3.2, 5.5], WEDGE = [0.85, 1.5, 2.5, 4.2];
-  const TINTS = ['200,208,225', '255,208,160'];   // sky-lit (cool) / sodium-lamp-lit (warm)
+  const TINTS = ['200,208,225', '255,208,160', '235,240,255'];   // sky-lit / sodium-lamp-lit / headlight-lit
   let buckets = [];
   function bucket(alpha, width, tint) {
     if (alpha < 0.012) return null;
@@ -548,19 +548,22 @@
   // and weighted by a Henyey–Greenstein phase function — water drops scatter strongly
   // forward, so rain between you and a lamp lights up.
   const SKY_E = 1.3, HG_G = 0.55;
-  let illumE = 0, illumWarm = 0;
+  let illumE = 0, illumWarm = 0, frameLights = [];
   function illuminate(x, y, z) {
     const vl = Math.hypot(x, y, z) || 1;
-    let lamp = 0;
-    for (const L of rainLights) {
+    let lamp = 0, white = 0;
+    for (const L of frameLights) {
       const dx = x - L.x, dy = y - L.y, dz = z - L.z;
       const d2 = dx * dx + dy * dy + dz * dz, d = Math.sqrt(d2);
       const cos = -(dx * x + dy * y + dz * z) / (d * vl);    // light→drop vs drop→camera
       const ph = (1 - HG_G * HG_G) / Math.pow(1 + HG_G * HG_G - 2 * HG_G * cos, 1.5);
-      lamp += L.I * ph / (d2 + 0.6);
+      // headlights are beams: only rain inside the cone is lit
+      const beam = L.bz ? Math.pow(Math.max(0, (dz * L.bz + dy * L.by) / d), 6) : 1;
+      const e = L.I * ph * beam / (d2 + 0.6);
+      if (L.white) white += e; else lamp += e;
     }
-    illumE = SKY_E + lamp;
-    illumWarm = lamp > SKY_E * 0.8 ? 1 : 0;
+    illumE = SKY_E + lamp + white;
+    illumWarm = white > SKY_E * 0.8 && white > lamp ? 2 : lamp > SKY_E * 0.8 ? 1 : 0;
   }
 
   function streak(x, y, z, vx, vy, vz, D, focus) {
@@ -612,6 +615,95 @@
     for (const s of splashes) streak(s.x, s.y, s.z, s.vx, s.vy, s.vz, s.D, focus);
     for (const d of drops) streak(d.x, d.y, d.z, d.vx, -d.v, 0, d.D, focus);
     flushBuckets();
+  }
+
+  // ---------- Traffic ----------
+  // Cars drive on the left (Japan): oncoming traffic uses the right-hand lane as we look
+  // down the street. Headlights light the rain ahead of them, tyres throw up spray, and
+  // their hiss is Doppler-shifted, f' = f·c / (c − v_r).
+  const cars = [];
+  let nextCar = 4;
+  function spawnCar() {
+    const oncoming = Math.random() < 0.55, v = 8 + Math.random() * 7;
+    cars.push({ x: oncoming ? 1.8 : -1.8, z: oncoming ? 170 : 2.5, vz: oncoming ? -v : v, oncoming,
+      voice: audio ? audio.carVoice() : null });
+  }
+  function updateCars(dt) {
+    nextCar -= dt;
+    if (nextCar <= 0) { if (cars.length < 3) spawnCar(); nextCar = 5 + Math.random() * 14; }
+    frameLights = rainLights.slice();
+    for (let i = cars.length - 1; i >= 0; i--) {
+      const c = cars[i];
+      c.z += c.vz * dt;
+      if (c.z < 2 || c.z > 175) {
+        if (c.voice) c.voice.stop();
+        cars.splice(i, 1);
+        continue;
+      }
+      if (c.oncoming && c.z < 60) {
+        for (const s of [-0.75, 0.75]) frameLights.push({ x: c.x + s, y: -HC + 0.7, z: c.z - 2, I: 60, white: true, bz: -1, by: -0.08 });
+      }
+      // spray from the tyres: water picked up by the tread is flung off behind and upward
+      if (c.z < 45 && splashes.length < 700 * quality) {
+        const n = Math.random() < dt * 90 * Math.min(1, 0.3 + state.rateNow / 20) ? 2 : 0;
+        const rear = c.z - Math.sign(c.vz) * 1.3;
+        for (let k = 0; k < n; k++) {
+          splashes.push({
+            x: c.x + (Math.random() < 0.5 ? -0.8 : 0.8) + (Math.random() - 0.5) * 0.2, y: -HC + 0.05, z: rear,
+            vx: (Math.random() - 0.5) * 2, vy: 0.6 + Math.random() * 2.2, vz: c.vz * (0.15 + Math.random() * 0.3),
+            D: 0.3 + Math.random() * 0.8,
+          });
+        }
+      }
+      if (c.voice) {
+        const r = Math.hypot(c.x, HC, c.z);
+        const vr = -c.z * c.vz / r;                         // speed toward us
+        c.voice.set(Math.min(1, 7.5 / r), SOUND_SPEED / (SOUND_SPEED - vr), c.x / r * 3, r);
+      }
+    }
+  }
+  function drawCars() {
+    if (!cars.length) return;
+    const focus = state.glass ? 0.4 : 8;
+    // bodies first: dark silhouettes (cabin + body) catching a little street light
+    ctx.fillStyle = 'rgba(6,8,13,0.92)';
+    for (const c of cars) {
+      const z = c.z, P = (x, y) => [cx + f * x / z, cy - f * y / z];
+      const [x0, y0] = P(c.x - 0.9, -HC + 0.25), [x1, y1] = P(c.x + 0.9, -HC + 0.95);
+      const [x2, y2] = P(c.x - 0.7, -HC + 1.45), [x3] = P(c.x + 0.7, -HC + 1.45);
+      ctx.beginPath();
+      ctx.moveTo(x0, y0); ctx.lineTo(x0, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y2); ctx.lineTo(x1, y1); ctx.lineTo(x1, y0);
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const c of cars) {
+      const z = c.z;
+      const coc = f * APERTURE * Math.abs(1 / z - 1 / focus);
+      const col = c.oncoming ? '255,246,228' : '255,40,28';
+      for (const s of [-0.75, 0.75]) {
+        const lx = c.x + s, ly = -HC + (c.oncoming ? 0.7 : 0.9);
+        const sx = cx + f * lx / z, sy = cy - f * ly / z;
+        const r = f * (c.oncoming ? 1.4 : 0.45) / z + coc * 1.5;
+        const a = (c.oncoming ? 0.95 : 0.8) / (1 + coc * 0.08);
+        let gr = ctx.createRadialGradient(sx, sy, 0, sx, sy, r);
+        gr.addColorStop(0, `rgba(${col},${a})`); gr.addColorStop(0.15, `rgba(${col},${a * 0.5})`); gr.addColorStop(1, `rgba(${col},0)`);
+        ctx.fillStyle = gr;
+        ctx.fillRect(sx - r, sy - r, r * 2, r * 2);
+        // reflection in the wet road, stretched toward us by the surface roughness
+        const gy = cy + f * HC / z, my = cy + f * (2 * HC + ly) / z;
+        const len = Math.max(4, (my - gy) * 6), w = f * 0.35 / z + coc;
+        ctx.save();
+        ctx.translate(sx, gy + len / 2);
+        ctx.scale(1, len / w);
+        gr = ctx.createRadialGradient(0, 0, 0, 0, 0, w);
+        gr.addColorStop(0, `rgba(${col},${a * 0.35})`); gr.addColorStop(1, `rgba(${col},0)`);
+        ctx.fillStyle = gr;
+        ctx.fillRect(-w, -w, w * 2, w * 2);
+        ctx.restore();
+      }
+    }
+    ctx.restore();
   }
 
   // ---------- Drops on the window glass ----------
@@ -1241,7 +1333,33 @@
       }
     }
     update();
-    return { ac, master, plink, tick, thunder, update };
+    // a passing car: tyre hiss on the wet road + low rolling noise, Doppler-shifted by
+    // changing the playback rate (which scales the whole spectrum), air absorption by distance
+    function carVoice() {
+      const hiss = loop(white), roll = loop(pink);
+      const bp = filter('bandpass', 1600, 0.5), air = filter('lowpass', 8000), g = gainNode(0), g2 = gainNode(0);
+      const out = panner(0, outdoor);
+      hiss.connect(bp).connect(air).connect(g).connect(out);
+      roll.connect(filter('lowpass', 160)).connect(g2).connect(out);
+      const pan = out.pan;
+      return {
+        set(amp, rate, p, r) {
+          const now = ac.currentTime;
+          hiss.playbackRate.setTargetAtTime(rate, now, 0.05);
+          roll.playbackRate.setTargetAtTime(rate, now, 0.05);
+          g.gain.setTargetAtTime(0.35 * amp, now, 0.05);
+          g2.gain.setTargetAtTime(0.5 * amp, now, 0.05);
+          air.frequency.setTargetAtTime(clamp(16000 * 15 / r, 900, 16000), now, 0.1);
+          if (pan) pan.setTargetAtTime(clamp(p, -1, 1), now, 0.05);
+        },
+        stop() {
+          const now = ac.currentTime;
+          g.gain.setTargetAtTime(0, now, 0.1); g2.gain.setTargetAtTime(0, now, 0.1);
+          hiss.stop(now + 0.6); roll.stop(now + 0.6);
+        },
+      };
+    }
+    return { ac, master, plink, tick, thunder, update, carVoice };
   }
 
   // ---------- Resize ----------
@@ -1352,6 +1470,7 @@
     updateFlash(dt);
     updateRain(dt);
     updateGlass(dt);
+    updateCars(dt);
 
     if (audio) {
       plinkAcc += dt * Math.min(35, 1.5 * Math.pow(state.rateNow, 0.7)) * (state.glass ? 0.5 : 1);
@@ -1413,6 +1532,7 @@
       ctx.drawImage(Ly.puddleLit, -ox, -oy, B, B);
       ctx.globalAlpha = 1;
     }
+    drawCars();
     // heavy rain scatters light: visibility drops as the rain rate rises
     hazeStyle = `rgba(55,60,75,${(0.28 * (1 - Math.exp(-state.rateNow / 40))).toFixed(3)})`;
     ctx.fillStyle = hazeStyle;
@@ -1462,7 +1582,7 @@
   }
 
   requestAnimationFrame(frame);
-  if (location.hash === '#debug') window.__rain = { state, makeChannel, lightning, get audio() { return audio; } };
+  if (location.hash === '#debug') window.__rain = { state, makeChannel, lightning, cars, spawnCar, get audio() { return audio; } };
 
   // ---------- UI ----------
   const $ = id => document.getElementById(id);
