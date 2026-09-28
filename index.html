@@ -178,13 +178,15 @@
   }
 
   // ---------- Background (night street seen from a window) ----------
-  let bgSharp, bgBlur, bgFlip, rainLights = [], puddles = [];
+  let bgSharp, bgFlip, layers, rainLights = [], puddles = [];
 
   function paintBackground() {
     const bs = Math.min(DPR, 1.5);
-    bgSharp = mkCanvas(B * bs, B * bs);
-    const g = bgSharp.getContext('2d');
-    g.scale(bs, bs);
+    const layer = () => { const c = mkCanvas(B * bs, B * bs), x = c.getContext('2d'); x.scale(bs, bs); return [c, x]; };
+    // layers: sky (behind the lightning channel), the sky lit from inside by a flash,
+    // and the front (street + skyline) that occludes the channel
+    const [skyC, skyG] = layer(), [skyLitC, litG] = layer(), [frontC, frontG] = layer();
+    let g = skyG;
     const hy = oy + cy;
     const P = (x, y, z) => [ox + cx + f * x / z, hy - f * y / z];
 
@@ -195,18 +197,29 @@
     g.fillStyle = gr;
     g.fillRect(0, 0, B, hy + 1);
 
-    for (let i = 0; i < 14; i++) {
-      const x = Math.random() * B, y = Math.random() * hy * 0.8, r = 80 + Math.random() * 220;
-      g.save();
-      g.translate(x, y); g.scale(1, 0.45);
-      const cg = g.createRadialGradient(0, 0, 0, 0, 0, r);
-      cg.addColorStop(0, 'rgba(70,72,95,0.12)');
-      cg.addColorStop(1, 'rgba(70,72,95,0)');
-      g.fillStyle = cg;
-      g.beginPath(); g.arc(0, 0, r, 0, TAU); g.fill();
-      g.restore();
+    // A flash reveals the cloud deck: the same cloud cells, barely visible in the dark,
+    // light up from inside (scattering in the cloud) — brightest at their thick cores
+    gr = litG.createLinearGradient(0, 0, 0, hy);
+    gr.addColorStop(0, '#4a5173');
+    gr.addColorStop(0.7, '#6d7299');
+    gr.addColorStop(1, '#8a86a6');
+    litG.fillStyle = gr;
+    litG.fillRect(0, 0, B, hy + 1);
+    for (let i = 0; i < 70; i++) {
+      const x = Math.random() * B, y = Math.pow(Math.random(), 0.7) * hy * 0.95, r = 40 + Math.random() * 200;
+      for (const [G2, col, a] of [[skyG, '70,72,95', 0.07], [litG, Math.random() < 0.5 ? '225,228,255' : '40,44,70', 0.28]]) {
+        G2.save();
+        G2.translate(x, y); G2.scale(1, 0.4 + Math.random() * 0.2);
+        const cg = G2.createRadialGradient(0, 0, 0, 0, 0, r);
+        cg.addColorStop(0, `rgba(${col},${a})`);
+        cg.addColorStop(1, `rgba(${col},0)`);
+        G2.fillStyle = cg;
+        G2.beginPath(); G2.arc(0, 0, r, 0, TAU); G2.fill();
+        G2.restore();
+      }
     }
 
+    g = frontG;
     gr = g.createLinearGradient(0, hy, 0, B);
     gr.addColorStop(0, '#0d1019');
     gr.addColorStop(1, '#040509');
@@ -255,8 +268,7 @@
       }
     }
     // drawn on a layer, then composited twice (blurred + sharp) so the water line is soft
-    const pl = mkCanvas(bgSharp.width, bgSharp.height), pg = pl.getContext('2d');
-    pg.scale(bs, bs);
+    const [pl, pg] = layer();
     { const g = pg;
     g.save();
     g.beginPath();
@@ -327,13 +339,44 @@
       g.beginPath(); g.arc(sx, sy, Math.max(0.7, f * 0.1 / L.z), 0, TAU); g.fill();
     }
 
-    // blurred copy = what you see when your eyes focus on the glass
-    const small = mkCanvas(B / 12, B / 12);
-    small.getContext('2d').drawImage(bgSharp, 0, 0, small.width, small.height);
-    bgBlur = mkCanvas(B / 4, B / 4);
-    const bctx = bgBlur.getContext('2d');
-    bctx.imageSmoothingQuality = 'high';
-    bctx.drawImage(small, 0, 0, bgBlur.width, bgBlur.height);
+    // puddles mirror the flash-lit sky
+    const [plitC, plitG] = layer();
+    plitG.save();
+    plitG.setTransform(1, 0, 0, 1, 0, 0);
+    plitG.globalAlpha = 0.45; plitG.drawImage(pb, 0, 0, pl.width, pl.height);
+    plitG.globalAlpha = 0.3; plitG.drawImage(pl, 0, 0);
+    plitG.globalAlpha = 1;
+    plitG.globalCompositeOperation = 'source-in';
+    gr = plitG.createLinearGradient(0, hy * bs, 0, B * bs);
+    gr.addColorStop(0, '#9a9ec4'); gr.addColorStop(0.6, '#5d6288');   // mirror of the lit cloud deck
+    plitG.fillStyle = gr;
+    plitG.fillRect(0, 0, plitC.width, plitC.height);
+    plitG.restore();
+
+    bgSharp = mkCanvas(B * bs, B * bs);
+    const sg = bgSharp.getContext('2d');
+    sg.drawImage(skyC, 0, 0); sg.drawImage(frontC, 0, 0);
+
+    // blurred copies = what you see when your eyes focus on the glass
+    // repeated 2× down/up-sampling with bilinear filtering approximates a Gaussian blur
+    const blur = c => {
+      let cur = c;
+      for (let k = 0; k < 5; k++) {
+        const n = mkCanvas(cur.width / 2, cur.height / 2);
+        n.getContext('2d').drawImage(cur, 0, 0, n.width, n.height);
+        cur = n;
+      }
+      for (let k = 0; k < 2; k++) {
+        const n = mkCanvas(cur.width * 2, cur.height * 2);
+        n.getContext('2d').drawImage(cur, 0, 0, n.width, n.height);
+        cur = n;
+      }
+      return cur;
+    };
+    layers = {
+      sharp: { sky: skyC, skyLit: skyLitC, front: frontC, puddleLit: plitC },
+      blur: { sky: blur(skyC), skyLit: blur(skyLitC), front: blur(frontC), puddleLit: blur(plitC) },
+    };
 
     // rotated 180°: a water drop is a tiny ball lens that shows the scene upside down
     bgFlip = mkCanvas(B * 0.5, B * 0.5);
@@ -836,6 +879,10 @@
       ctx.drawImage(bgFlip, sx, sy, s, s, -R, -R, R * 2, R * 2);
       ctx.fillStyle = hazeStyle;              // the drop sees the same rain-scattered light as we do
       ctx.fillRect(-R, -R, R * 2, R * 2);
+      if (flashLevel > 0.01) {                // …and the flash-lit sky, gathered by the lens
+        ctx.fillStyle = `rgba(165,175,235,${Math.min(0.6, flashLevel * 0.5).toFixed(3)})`;
+        ctx.fillRect(-R, -R, R * 2, R * 2);
+      }
       ctx.rotate(rot);
       ctx.globalAlpha = 1 - 0.5 * d.spread;
       ctx.drawImage(shade, -rx, -tail, rx * 2, ry + tail);
@@ -847,7 +894,7 @@
 
   // ---------- Lightning ----------
   const flashes = [];
-  let flashLevel = 0, flashPeak = 1, bolt = null, thunderInfo = null;
+  let flashLevel = 0, flashPeak = 1, flashX = 0, bolt = null, thunderInfo = null;
 
   // A cloud-to-ground discharge as a tortuous 3D channel (mean direction change ≈ 16° per
   // segment, Hill 1968) with branches and a horizontal in-cloud part. The same geometry is
@@ -901,6 +948,7 @@
       t += 0.04 + Math.random() * 0.12;
     }
     const channel = makeChannel(d, az);
+    flashX = cx + f * Math.tan(az);
     bolt = null;
     if (d < 8000) {
       const w = clamp(f * 6 / d, 0.8, 3.5);
@@ -939,10 +987,11 @@
     ctx.save();
     ctx.lineCap = 'round';
     ctx.shadowColor = 'rgba(170,190,255,0.9)';
-    ctx.shadowBlur = 18;
+    const defocus = state.glass ? 4 : 1;                    // eyes focused on the glass
+    ctx.shadowBlur = 18 * defocus;
     paths.forEach((p, depth) => {
-      ctx.strokeStyle = `rgba(240,244,255,${a * (1 - depth * 0.2)})`;
-      ctx.lineWidth = bolt.w * Math.pow(0.5, depth);
+      ctx.strokeStyle = `rgba(240,244,255,${a * (1 - depth * 0.2) / Math.sqrt(defocus)})`;
+      ctx.lineWidth = bolt.w * Math.pow(0.5, depth) * defocus;
       ctx.stroke(p);
     });
     ctx.restore();
@@ -1284,12 +1333,32 @@
     if (state.theta) {
       ctx.translate(W / 2, H / 2); ctx.rotate(state.theta); ctx.translate(-W / 2, -H / 2);
     }
-    ctx.drawImage(state.glass ? bgBlur : bgSharp, -ox, -oy, B, B);
+    const Ly = state.glass ? layers.blur : layers.sharp;
+    const fl = Math.min(1, flashLevel);
+    ctx.drawImage(Ly.sky, -ox, -oy, B, B);
+    if (fl > 0.01) {
+      ctx.globalAlpha = fl;
+      ctx.drawImage(Ly.skyLit, -ox, -oy, B, B);
+      // the cloud glows brightest around where the channel enters it
+      ctx.globalCompositeOperation = 'lighter';
+      const r = H * 0.7, gr = ctx.createRadialGradient(flashX, -oy, 0, flashX, -oy, r);
+      gr.addColorStop(0, 'rgba(170,180,255,0.5)'); gr.addColorStop(1, 'rgba(170,180,255,0)');
+      ctx.fillStyle = gr;
+      ctx.fillRect(-ox, -oy, B, cy + oy);
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = 1;
+    }
+    drawBolt();
+    ctx.drawImage(Ly.front, -ox, -oy, B, B);
+    if (fl > 0.01) {
+      ctx.globalAlpha = fl * 0.8;
+      ctx.drawImage(Ly.puddleLit, -ox, -oy, B, B);
+      ctx.globalAlpha = 1;
+    }
     // heavy rain scatters light: visibility drops as the rain rate rises
     hazeStyle = `rgba(55,60,75,${(0.28 * (1 - Math.exp(-state.rateNow / 40))).toFixed(3)})`;
     ctx.fillStyle = hazeStyle;
     ctx.fillRect(-ox, -oy, B, B);
-    drawBolt();
     drawRain();
     ctx.restore();
 
@@ -1300,9 +1369,9 @@
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
       const gr = ctx.createLinearGradient(0, 0, 0, H);
-      gr.addColorStop(0, `rgba(150,160,210,${fl * 0.5})`);
-      gr.addColorStop(0.45, `rgba(150,160,210,${fl * 0.3})`);
-      gr.addColorStop(1, `rgba(120,130,170,${fl * 0.12})`);
+      gr.addColorStop(0, `rgba(150,160,210,${fl * 0.16})`);
+      gr.addColorStop(0.45, `rgba(150,160,210,${fl * 0.1})`);
+      gr.addColorStop(1, `rgba(120,130,170,${fl * 0.06})`);
       ctx.fillStyle = gr;
       ctx.fillRect(0, 0, W, H);
       ctx.restore();
@@ -1326,7 +1395,7 @@
   }
 
   requestAnimationFrame(frame);
-  if (location.hash === '#debug') window.__rain = { state, makeChannel, get audio() { return audio; } };
+  if (location.hash === '#debug') window.__rain = { state, makeChannel, lightning, get audio() { return audio; } };
 
   // ---------- UI ----------
   const $ = id => document.getElementById(id);
