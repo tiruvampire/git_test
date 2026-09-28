@@ -457,6 +457,15 @@
       ctx.lineWidth = Math.max(0.6, f * 0.12 / (z + 1.5 - cam.z));
       ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(b.x, b.y); ctx.stroke();
     }
+    // tactile paving (点字ブロック): a line of yellow guide blocks, glossy when wet
+    const tq = groundQuad(0.95, 1.25, cam.z + 0.3, cam.z + 120);
+    if (tq) { ctx.fillStyle = 'rgba(200,160,40,0.42)'; fillQuad(tq); }
+    ctx.strokeStyle = 'rgba(90,70,20,0.5)'; ctx.lineWidth = 1;
+    for (let z = Math.ceil(cam.z / 0.3) * 0.3; z < cam.z + 20; z += 0.3) {
+      if (z < cam.z + 0.5) continue;
+      const a = proj(0.95, 0, z), ax = a.x, ay = a.y, b = proj(1.25, 0, z);
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
     ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 1;
     for (let z = Math.ceil(cam.z / 0.6) * 0.6; z < cam.z + 25; z += 0.6) {
       if (z < cam.z + 0.5) continue;
@@ -1180,7 +1189,7 @@
   const A_C = Math.sqrt(3 * SIGMA * HYST / (Math.PI * RHO * G)) * 1000;   // mm
   const tips = Array.from({ length: U.ribs }, (_, k) => ({ phi0: (k + 0.5) * TAU / U.ribs - Math.PI, phi: 0, V: 0, stream: 0 }));
   const TIP_DRIP_V = 0.6 * 2 * Math.PI * 0.004 * SIGMA / (RHO * G);   // Tate's law, 4 mm tip
-  const rimDrops = [];
+  const rimDrops = [], oldTrails = [];
   let impactsVis = [];
 
   function canopyHit(d) {
@@ -1279,6 +1288,8 @@
         d.moving = true;
         const target = Math.min(0.25, 0.003 + SIGMA * HYST / (MU * 60) * (Fm / Fpin - 1));
         d.speed += (target - d.speed) * Math.min(1, dt / 0.06);
+        d.trailT = (d.trailT || 0) + dt;
+        if (d.trailT > 0.04) { (d.trail || (d.trail = [])).push([d.th, d.phi]); if (d.trail.length > 12) d.trail.shift(); d.trailT = 0; }
         d.th += d.speed * dt * Fth / Fm / U.Rs;
         d.phi += d.speed * dt * Fph / Fm / (U.Rs * Math.max(0.05, sT));
         d.V *= 1 - 0.02 * dt;                               // sheds a thin film as it runs
@@ -1308,7 +1319,12 @@
         }
       }
     }
-    for (let i = cdrops.length - 1; i >= 0; i--) if (cdrops[i].dead) cdrops.splice(i, 1);
+    for (let i = cdrops.length - 1; i >= 0; i--) if (cdrops[i].dead) {
+      // the wet path a runner leaves on the vinyl stays visible for a moment, then thins out
+      if (cdrops[i].trail && cdrops[i].trail.length > 2 && cdrops[i].a > 1.8 && oldTrails.length < 15) oldTrails.push({ pts: cdrops[i].trail, a: cdrops[i].a, age: 0 });
+      cdrops.splice(i, 1);
+    }
+    for (let i = oldTrails.length - 1; i >= 0; i--) { oldTrails[i].age += dt; if (oldTrails[i].age > 2.5) oldTrails.splice(i, 1); }
 
     // rib tips: a drop leaves when its weight beats surface tension (Tate). At high inflow
     // the dripping becomes a continuous thread that breaks up into drops (Plateau–Rayleigh).
@@ -1376,6 +1392,25 @@
     }
     // 2. beads on the vinyl — out of focus (we look at the street), each a tiny lens
     const coc = (z) => f * APERTURE * Math.abs(1 / z - 1 / focusD);
+    // rivulets: the thin film left behind by beads that ran down the canopy
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    const trailPath = (pts, a, alpha) => {
+      ctx.beginPath();
+      let zt = 0.5, n = 0;
+      for (const [th, phi] of pts) {
+        const p = canopyPoint(th, phi);
+        if (p[2] < 0.05) continue;
+        const sx = cx + f * p[0] / p[2], sy = cy - f * p[1] / p[2];
+        if (n++) ctx.lineTo(sx, sy); else { ctx.moveTo(sx, sy); zt = p[2]; }
+      }
+      if (n < 2) return;
+      const b = coc(zt);
+      ctx.strokeStyle = `rgba(200,212,235,${(alpha / (1 + b * 0.25)).toFixed(3)})`;
+      ctx.lineWidth = f * a * 0.5e-3 / zt + b * 0.4;
+      ctx.stroke();
+    };
+    for (const t of oldTrails) trailPath(t.pts, t.a, 0.07 * (1 - t.age / 2.5));
+    for (const d of cdrops) if (d.moving && d.a > 1.8 && d.trail && d.trail.length > 1) trailPath(d.trail.concat([[d.th, d.phi]]), d.a, 0.08);
     for (const d of cdrops) {
       const p = canopyPoint(d.th, d.phi);
       if (p[2] < 0.05) continue;
