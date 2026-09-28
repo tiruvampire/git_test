@@ -273,12 +273,9 @@
       if (zr < 0.8) continue;
       const m = proj(L.x, -L.y, L.z), r = clamp(f * L.size * 0.35 / zr, 2, 40);
       if (m.y > H + r || m.y < cy) continue;
-      ctx.save();
-      ctx.translate(m.x, m.y); ctx.scale(1, 1.6);
-      const g2 = ctx.createRadialGradient(0, 0, 0, 0, 0, r);
-      g2.addColorStop(0, `rgba(${L.col},0.8)`); g2.addColorStop(0.35, `rgba(${L.col},0.25)`); g2.addColorStop(1, `rgba(${L.col},0)`);
-      ctx.fillStyle = g2; ctx.fillRect(-r, -r, r * 2, r * 2);
-      ctx.restore();
+      ctx.globalAlpha = 0.8;
+      ctx.drawImage(glowSprite(L.col), m.x - r, m.y - r * 1.6, r * 2, r * 3.2);
+      ctx.globalAlpha = 1;
     }
     ctx.restore();
   }
@@ -322,6 +319,22 @@
 
   // light sources of this frame (for rain illumination and reflections)
   let lights = [];
+  // pre-rendered radial glows, one per colour, reused every frame instead of new gradients
+  const glowCache = new Map();
+  function glowSprite(col, soft) {
+    const key = col + (soft ? 's' : '');
+    let c = glowCache.get(key);
+    if (!c) {
+      c = mkCanvas(64, 64);
+      const g = c.getContext('2d'), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+      gr.addColorStop(0, `rgba(${col},1)`);
+      if (!soft) gr.addColorStop(0.35, `rgba(${col},0.3)`);
+      gr.addColorStop(1, `rgba(${col},0)`);
+      g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+      glowCache.set(key, c);
+    }
+    return c;
+  }
 
   function drawSky() {
     const gr = ctx.createLinearGradient(0, 0, 0, cy);
@@ -374,15 +387,11 @@
       const m = proj(L.x, -L.y, L.z), my = m.y;
       const w = Math.max(1.5, f * L.size * 0.5 / zr);
       const len = Math.max(w, (my - gy) * 2.2);
-      ctx.save();
-      ctx.translate(gx, gy + len * 0.5);
-      ctx.scale(1, len / w);
-      const gr = ctx.createRadialGradient(0, 0, 0, 0, 0, w);
-      gr.addColorStop(0, `rgba(${L.col},${L.refl})`); gr.addColorStop(1, `rgba(${L.col},0)`);
-      ctx.fillStyle = gr;
-      ctx.fillRect(-w, -w, w * 2, w * 2);
-      ctx.restore();
+      if (gy > H || gx + w < 0 || gx - w > W) continue;
+      ctx.globalAlpha = L.refl;
+      ctx.drawImage(glowSprite(L.col, true), gx - w, gy, w * 2, len);
     }
+    ctx.globalAlpha = 1;
     ctx.restore();
   }
 
@@ -1553,6 +1562,14 @@
     qualityT = 0;
     if (ftAvg > ftBase * 1.22 && quality > 0.35) quality *= 0.85;
     else if (ftAvg < ftBase * 1.08 && quality < 1) quality = Math.min(1, quality * 1.04);
+    // last resort: fewer pixels (GPU fill rate), restored once there is headroom again
+    const want = quality < 0.5 ? 0.7 : quality > 0.9 ? 1 : renderScale;
+    if (want !== renderScale) { renderScale = want; sizeCanvas(); }
+  }
+  let renderScale = 1;
+  function sizeCanvas() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2) * renderScale;
+    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
   }
   function gustField(x, t) {
     const X = x - state.wind0 * t;
@@ -1641,9 +1658,8 @@
 
   let vignette, cy0 = 0;
   function resize() {
-    DPR = Math.min(window.devicePixelRatio || 1, 2);
     W = window.innerWidth; H = window.innerHeight;
-    canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+    sizeCanvas();
     f = 0.62 * Math.hypot(W, H);
     cx = W / 2; cy0 = cy = H * 0.56;
     vignette = mkCanvas(W, H);
