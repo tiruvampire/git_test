@@ -1805,7 +1805,10 @@
     const umb = gainNode(1);
     // more rain strikes the windward side of the canopy: the drumming leans that way
     const umbPan = panner(0, master);
-    umb.connect(umbPan); umb.connect(gainNode(0.08)).connect(verb);
+    // the wetter the canopy, the thicker the water film on it: drops land in liquid instead of
+    // on bare vinyl (less click), and the film's mass loads the membrane (lower resonance)
+    const filmShelf = filter('highshelf', 3000, 0.7, 0), filmLP = filter('lowpass', 14000, 0.5);
+    umb.connect(filmShelf).connect(filmLP).connect(umbPan); umb.connect(gainNode(0.08)).connect(verb);
     umbLight.connect(umb); umbHeavy.connect(umb);
     const players = [
       texturePlayer(streetRain(700, 5), streetLight), texturePlayer(streetRain(6000, 4), streetHeavy),
@@ -1921,6 +1924,9 @@
       umbHeavy.gain.setTargetAtTime(Math.sin(x * Math.PI / 2) * lvl * open, now, 0.12);
       roofGain.gain.setTargetAtTime(lvl * 0.7 * arcadeNear, now, 0.2);
       if (umbPan.pan) umbPan.pan.setTargetAtTime(clamp(-state.wind / 15, -0.6, 0.6), now, 0.3);
+      const film = 1 - Math.exp(-R / 30);
+      filmShelf.gain.setTargetAtTime(-7 * film, now, 1);
+      filmLP.frequency.setTargetAtTime(14000 - 8000 * film, now, 1);
       // a vending machine's transformer and compressor hum at twice the mains frequency
       // (50 Hz in eastern Japan → 100 Hz) with harmonics, heard only close by
       humGain.gain.setTargetAtTime(0.05 * vendNear, now, 0.15);
