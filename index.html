@@ -101,7 +101,7 @@
   const G = 9.81;                 // m/s²
   const SOUND_SPEED = 343;        // m/s
   const HC = 3.0;                 // camera height above the street (m) — a 2nd-floor window
-  const ZN = 0.5, ZF = 16;        // depth range of the simulated rain volume (m)
+  const ZN = 0.5, ZF = 24;        // depth range of the simulated rain volume (m)
   const EXPOSURE = 0.03;          // s — motion-blur time of the eye/camera
   const APERTURE = 0.004;         // m — lens/pupil diameter (depth-of-field blur)
   const PX_PER_MM = 6.3;          // scale of the window glass (≈ true size on an iPhone screen)
@@ -151,7 +151,7 @@
   const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
 
   // ---------- Background (night street seen from a window) ----------
-  let bgSharp, bgBlur, bgFlip;
+  let bgSharp, bgBlur, bgFlip, rainLights = [];
 
   function paintBackground() {
     const bs = Math.min(DPR, 1.5);
@@ -188,7 +188,7 @@
 
     const lights = [];
     for (const side of [-5.5, 5.5]) {
-      for (let z = 7; z < 150; z += 14) {
+      for (let z = 5; z < 150; z += 12) {
         lights.push({ x: side - Math.sign(side) * 1.2, y: 5 - HC, z, pole: side, col: [255, 172, 92], size: 2.2 });
       }
     }
@@ -217,6 +217,9 @@
       g.beginPath(); g.arc(0, 0, r * 0.7, 0, TAU); g.fill();
       g.restore();
     }
+
+    rainLights = lights.filter(L => L.pole !== undefined && L.z < 32).map(L => ({ x: L.x, y: L.y, z: L.z, I: 16 }));
+    rainLights.push({ x: 0, y: 0.2, z: -0.6, I: 0.35 });   // warm light spilling from our own room
 
     drawSkyline(g, hy + 3, 18, 60, 15, 90, '#111523', 0.18, 0.55);
     gr = g.createLinearGradient(0, hy - 130, 0, hy + 6);
@@ -290,12 +293,16 @@
   const ripples = [];
 
   function spawnDrop(d, initial) {
-    d.z = Math.cbrt(ZN ** 3 + Math.random() * (ZF ** 3 - ZN ** 3));   // uniform in the view volume
+    // pdf ∝ z instead of the frustum's z²: far drops are sub-pixel, so we spend the budget near the eye
+    d.z = Math.sqrt(ZN * ZN + Math.random() * (ZF * ZF - ZN * ZN));
     d.D = sampleD(state.rate);
     d.v = termVel(d.D);
-    d.xl = -B / 2 * d.z / f;
-    d.xr = B / 2 * d.z / f;
-    const ytop = (cy + oy) * d.z / f;
+    // only the part of the (possibly rotated) world that is actually on screen
+    const c = Math.abs(Math.cos(state.theta)), sn = Math.abs(Math.sin(state.theta));
+    const hw = (W * c + H * sn) / 2 + 20, hh = (W * sn + H * c) / 2 + 20;
+    d.xl = -hw * d.z / f;
+    d.xr = hw * d.z / f;
+    const ytop = (cy - H / 2 + hh) * d.z / f;
     const drift = state.wind * (ytop + HC) / d.v;
     d.x = d.xl - Math.max(0, drift) + Math.random() * (d.xr - d.xl + Math.abs(drift));
     d.y = initial ? -HC + Math.random() * (ytop + HC) : ytop + Math.random() * 0.3;
@@ -304,7 +311,9 @@
   }
 
   function targetDropCount() {
-    return Math.min(2400, visibleDensity(state.rate) * (B * B) / (930 * 930));
+    const c = Math.abs(Math.cos(state.theta)), sn = Math.abs(Math.sin(state.theta));
+    const area = (W * c + H * sn) * (W * sn + H * c);
+    return Math.min(4000, 1.6 * visibleDensity(state.rate) * area / (390 * 844));
   }
 
   function impact(d) {
@@ -360,28 +369,48 @@
     }
   }
 
-  // stroke batching: bucket by alpha and width so thousands of streaks cost ~30 draw calls
-  const AB = 6, WB = 5, WREP = [0.6, 1.1, 1.9, 3.2, 5.5], WEDGE = [0.85, 1.5, 2.5, 4.2];
+  // stroke batching: bucket by tint, alpha and width so thousands of streaks cost a few dozen draw calls
+  const AB = 7, AMAX = 0.85, WB = 5, WREP = [0.6, 1.1, 1.9, 3.2, 5.5], WEDGE = [0.85, 1.5, 2.5, 4.2];
+  const TINTS = ['200,208,225', '255,208,160'];   // sky-lit (cool) / sodium-lamp-lit (warm)
   let buckets = [];
-  function bucket(alpha, width) {
+  function bucket(alpha, width, tint) {
     if (alpha < 0.012) return null;
-    const ai = Math.min(AB - 1, (alpha / 0.6 * AB) | 0);
+    const ai = Math.min(AB - 1, (alpha / AMAX * AB) | 0);
     let wi = 0;
     while (wi < 4 && width > WEDGE[wi]) wi++;
-    const k = ai * WB + wi;
+    const k = (tint * AB + ai) * WB + wi;
     return buckets[k] || (buckets[k] = new Path2D());
   }
-  function flushBuckets(rgb) {
+  function flushBuckets() {
     ctx.lineCap = 'round';
     for (let k = 0; k < buckets.length; k++) {
       const p = buckets[k];
       if (!p) continue;
-      const ai = (k / WB) | 0, wi = k % WB;
-      ctx.strokeStyle = `rgba(${rgb},${((ai + 0.5) / AB * 0.6).toFixed(3)})`;
+      const wi = k % WB, ai = ((k / WB) | 0) % AB, tint = (k / (WB * AB)) | 0;
+      ctx.strokeStyle = `rgba(${TINTS[tint]},${((ai + 0.5) / AB * AMAX).toFixed(3)})`;
       ctx.lineWidth = WREP[wi];
       ctx.stroke(p);
     }
     buckets = [];
+  }
+
+  // Radiance of a drop: dim ambient sky glow plus every nearby lamp, falling off with 1/d²
+  // and weighted by a Henyey–Greenstein phase function — water drops scatter strongly
+  // forward, so rain between you and a lamp lights up.
+  const SKY_E = 1.3, HG_G = 0.55;
+  let illumE = 0, illumWarm = 0;
+  function illuminate(x, y, z) {
+    const vl = Math.hypot(x, y, z) || 1;
+    let lamp = 0;
+    for (const L of rainLights) {
+      const dx = x - L.x, dy = y - L.y, dz = z - L.z;
+      const d2 = dx * dx + dy * dy + dz * dz, d = Math.sqrt(d2);
+      const cos = -(dx * x + dy * y + dz * z) / (d * vl);    // light→drop vs drop→camera
+      const ph = (1 - HG_G * HG_G) / Math.pow(1 + HG_G * HG_G - 2 * HG_G * cos, 1.5);
+      lamp += L.I * ph / (d2 + 0.6);
+    }
+    illumE = SKY_E + lamp;
+    illumWarm = lamp > SKY_E * 0.8 ? 1 : 0;
   }
 
   function streak(x, y, z, vx, vy, vz, D, focus) {
@@ -393,8 +422,12 @@
     const wPhys = f * D * 1e-3 / z;
     const coc = f * APERTURE * Math.abs(1 / z - 1 / focus);   // circle of confusion
     const width = Math.max(0.5, wPhys) + coc;
-    const alpha = (0.18 + 0.5 * Math.min(1, D / 3)) * Math.exp(-z / 14) * Math.min(1, (wPhys * 2 + 0.35) / width);
-    const p = bucket(Math.min(0.6, alpha), width);
+    // Garg & Nayar: a pixel only sees the drop for τ = D / v of the exposure T
+    const speed = Math.max(0.3, Math.hypot(vx, vy, vz));
+    const cover = D * 1e-3 / (speed * EXPOSURE);
+    illuminate(x, y, z);
+    const alpha = 34 * cover * illumE * Math.exp(-z / 14) * Math.min(1, (wPhys * 2 + 0.35) / width);
+    const p = bucket(Math.min(AMAX, alpha), width, illumWarm);
     if (!p) return;
     p.moveTo(s1x, s1y);
     p.lineTo(s2x, s2y);
@@ -427,7 +460,7 @@
 
     for (const s of splashes) streak(s.x, s.y, s.z, s.vx, s.vy, s.vz, s.D, focus);
     for (const d of drops) streak(d.x, d.y, d.z, d.vx, -d.v, 0, d.D, focus);
-    flushBuckets('200,208,225');
+    flushBuckets();
   }
 
   // ---------- Drops on the window glass ----------
