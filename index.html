@@ -1292,13 +1292,31 @@
       for (let i = 0; i < len; i++) { L[i] = Math.tanh(L[i] * norm); R[i] = Math.tanh(R[i] * norm); }
       return buf;
     }
+    // Rain is a stationary random process — it never repeats. Instead of looping a buffer,
+    // play overlapping grains from random offsets joined by equal-power crossfades.
+    const XF = 0.45, GRAIN = 1.8, CURVE = 32;
+    const fadeIn = new Float32Array(CURVE).map((_, i) => Math.sin(i / (CURVE - 1) * Math.PI / 2));
+    const fadeOut = new Float32Array(CURVE).map((_, i) => Math.cos(i / (CURVE - 1) * Math.PI / 2));
+    function texturePlayer(buf, dest) {
+      let next = ac.currentTime + 0.05;
+      return function schedule() {
+        if (next < ac.currentTime) next = ac.currentTime + 0.05;   // after a suspend/resume
+        while (next < ac.currentTime + 0.6) {
+          const src = ac.createBufferSource(), g = ac.createGain();
+          src.buffer = buf;
+          g.gain.value = 0;
+          g.gain.setValueCurveAtTime(fadeIn, next, XF);
+          g.gain.setValueCurveAtTime(fadeOut, next + GRAIN - XF, XF);
+          src.connect(g).connect(dest);
+          src.start(next, rnd() * (buf.duration - GRAIN), GRAIN);
+          next += GRAIN - XF;
+        }
+      };
+    }
     const lightGain = gainNode(0), heavyGain = gainNode(0);
-    const lightSrc = ac.createBufferSource(), heavySrc = ac.createBufferSource();
-    lightSrc.buffer = rainBuffer(700, 5); lightSrc.loop = true;
-    heavySrc.buffer = rainBuffer(6000, 4); heavySrc.loop = true;
-    lightSrc.connect(lightGain).connect(outdoor);
-    heavySrc.connect(heavyGain).connect(outdoor);
-    lightSrc.start(); heavySrc.start();
+    lightGain.connect(outdoor); heavyGain.connect(outdoor);
+    const players = [texturePlayer(rainBuffer(700, 5), lightGain), texturePlayer(rainBuffer(6000, 4), heavyGain)];
+    players.forEach(p => p());
     // distant rain on roofs and the whole city merges into a low roar
     const roarGain = gainNode(0);
     loop(pink).connect(filter('lowpass', 500)).connect(roarGain).connect(outdoor);
@@ -1392,6 +1410,7 @@
     }
 
     function update() {
+      players.forEach(p => p());
       const now = ac.currentTime, R = state.rateNow, u = Math.abs(state.wind);
       master.gain.setTargetAtTime(state.volume * state.fade, now, 0.1);
       open.gain.setTargetAtTime(state.glass ? 0 : 1, now, 0.25);
