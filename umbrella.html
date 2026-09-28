@@ -494,6 +494,93 @@
     }
   }
 
+  // ---------- people under umbrellas ----------
+  // Many carry the same clear vinyl umbrella; some black, navy, beige or red. When two
+  // people pass on a narrow sidewalk both tilt their umbrellas away from each other
+  // (傘かしげ, an old Edo courtesy) — so do we.
+  const peds = [];
+  let nextPed = 0.5;
+  const UMB_KINDS = [['vinyl'], ['vinyl'], ['vinyl'], ['vinyl'], ['20,22,28'], ['28,36,70'], ['190,170,140'], ['170,30,40']];
+  function spawnPed(initial) {
+    const ours = Math.random() < 0.55, toward = Math.random() < 0.75;
+    const v = 1.05 + Math.random() * 0.45;
+    const x = ours ? -0.7 + (Math.random() - 0.5) * 0.3 : -9.55 + (Math.random() - 0.5) * 0.6;
+    const z = cam.z + (initial ? 6 + Math.random() * 60 : toward ? 70 + Math.random() * 40 : 8 + Math.random() * 30);
+    peds.push({ x, z, vz: toward ? -v : v * (0.6 + Math.random() * 0.3), phase: Math.random() * TAU, ours,
+      kind: UMB_KINDS[(Math.random() * UMB_KINDS.length) | 0][0], h: 1.5 + Math.random() * 0.35, tilt: 0, lastStep: 0 });
+  }
+  let courtesy = 0;                                   // our own umbrella tilt when passing someone
+  function updatePeds(dt) {
+    nextPed -= dt;
+    if (nextPed <= 0) { if (peds.length < 12) spawnPed(false); nextPed = 1.5 + Math.random() * 4; }
+    let pass = 0;
+    for (let i = peds.length - 1; i >= 0; i--) {
+      const p = peds[i];
+      p.z += p.vz * dt;
+      p.phase += TAU * STEP_HZ * dt * Math.abs(p.vz) / WALK_SPEED;
+      const zr = p.z - cam.z;
+      if (zr < -3 || zr > 160) { peds.splice(i, 1); continue; }
+      const near = p.ours && zr > -1 && zr < 4.5;
+      p.tilt += ((near ? -0.4 : 0) - p.tilt) * Math.min(1, dt * 3);
+      if (near) pass = 1;
+      // their footsteps, when close enough to hear
+      const st = Math.floor(p.phase / Math.PI);
+      if (st !== p.lastStep) {
+        p.lastStep = st;
+        const r = Math.hypot(p.x - cam.x, zr);
+        if (audio && r < 9) audio.otherStep(Math.min(1, 1.2 / r), clamp((p.x - cam.x) / r, -1, 1));
+      }
+    }
+    courtesy += (pass * 0.28 - courtesy) * Math.min(1, dt * 3);
+  }
+  function drawPeds() {
+    peds.sort((a, b) => b.z - a.z);
+    for (const p of peds) {
+      const zr = p.z - cam.z;
+      if (zr < 0.8) continue;
+      const P = (x, y) => { const q = proj(p.x + x, y, p.z); return [q.x, q.y]; };
+      const s = f / zr;                                   // px per metre at this depth
+      const [fx, fy] = P(0, 0);
+      if (fx < -s * 1.2 || fx > W + s * 1.2) continue;
+      const fog = Math.exp(-zr / 60);
+      // legs swing with the gait
+      const sw = 0.22 * Math.sin(p.phase);
+      ctx.strokeStyle = `rgba(10,12,16,${0.95 * fog})`;
+      ctx.lineWidth = Math.max(0.8, 0.12 * s);
+      ctx.lineCap = 'round';
+      const [hx, hy] = P(0, 0.85);
+      for (const k of [1, -1]) { const [lx, ly] = P(0.08 * k, 0.02); ctx.beginPath(); ctx.moveTo(hx, hy); ctx.lineTo(lx, ly + sw * k * s * 0.4 * Math.sign(p.vz)); ctx.stroke(); }
+      // coat and head
+      ctx.fillStyle = `rgba(14,16,22,${0.96 * fog})`;
+      const [bx, by] = P(-0.21, p.h - 0.28), [bx2, by2] = P(0.21, 0.8);
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(bx, by, bx2 - bx, by2 - by, 0.08 * s); else ctx.rect(bx, by, bx2 - bx, by2 - by);
+      ctx.fill();
+      const [nx, ny] = P(0, p.h - 0.13);
+      ctx.beginPath(); ctx.arc(nx, ny, 0.105 * s, 0, TAU); ctx.fill();
+      // the umbrella: a shallow dome above the head, tilted when passing us
+      const [ux, uy] = P(0.05 + p.tilt * 0.5, p.h + 0.3);
+      const rx = 0.5 * s, ry = 0.2 * s;
+      ctx.save();
+      ctx.translate(ux, uy); ctx.rotate(p.tilt);
+      ctx.strokeStyle = `rgba(30,32,38,${0.8 * fog})`; ctx.lineWidth = Math.max(0.6, 0.015 * s);
+      ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, 0.45 * s); ctx.stroke();            // shaft
+      ctx.beginPath();
+      ctx.moveTo(-rx, ry * 0.25);
+      ctx.bezierCurveTo(-rx * 0.9, -ry * 1.2, rx * 0.9, -ry * 1.2, rx, ry * 0.25);
+      for (let k = 3; k >= -3; k--) ctx.quadraticCurveTo(rx * (k + 0.5) / 4, ry * 0.05, rx * k / 4, ry * 0.25);   // scalloped rim
+      ctx.closePath();
+      if (p.kind === 'vinyl') {
+        ctx.fillStyle = `rgba(225,232,245,${0.16 * fog})`; ctx.fill();
+        ctx.strokeStyle = `rgba(235,240,250,${0.45 * fog})`; ctx.lineWidth = Math.max(0.5, 0.012 * s); ctx.stroke();
+      } else {
+        ctx.fillStyle = `rgba(${p.kind},${0.95 * fog})`; ctx.fill();
+        ctx.strokeStyle = `rgba(200,210,230,${0.18 * fog})`; ctx.lineWidth = Math.max(0.5, 0.01 * s); ctx.stroke();  // wet sheen
+      }
+      ctx.restore();
+    }
+  }
+
   function drawCity() {
     lights = [];
     const bl = visibleBlocks();
@@ -505,6 +592,7 @@
       drawBuildingSide(blk.right, SIDE_R, false, blk);
       if (blk.vend) drawVending(blk.vend);
     }
+    drawPeds();
   }
 
   // ---------- rain around us ----------
@@ -734,7 +822,7 @@
     }
   }
   function updateCanopy(dt) {
-    U.roll += (clamp(-state.wind * 0.025, -0.3, 0.3) - U.roll) * Math.min(1, dt * 2);
+    U.roll += (clamp(-state.wind * 0.025 - courtesy, -0.4, 0.4) - U.roll) * Math.min(1, dt * 2);
     const spin = 0.18 + 0.12 * noise1(time * 0.07 + 900);    // the hand slowly turns the shaft
     for (const d of cdrops) d.phi += spin - U.spin;             // beads turn with the fabric
     U.spin = spin;
@@ -1186,7 +1274,16 @@
         },
       };
     }
-    return { ac, master, update, step, footDrip, carVoice };
+    // someone else's footsteps nearby: the same wet heel strike, quieter and more reverberant
+    function otherStep(amp, pan) {
+      const t = ac.currentTime;
+      const s = ac.createBufferSource(), g = ac.createGain();
+      s.buffer = white;
+      g.gain.setValueAtTime(0.22 * amp, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.06);
+      s.connect(filter('bandpass', 1100, 0.8)).connect(g).connect(panner(pan, street));
+      s.start(t, rnd(), 0.08);
+    }
+    return { ac, master, update, step, footDrip, carVoice, otherStep };
   }
 
   // ---------- loop ----------
@@ -1225,6 +1322,7 @@
     updateRain(dt);
     updateCanopy(dt);
     updateCars(dt);
+    updatePeds(dt);
     if (audio) { audioT += dt; if (audioT > 0.1) { audio.update(); audioT = 0; } }
 
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
@@ -1271,6 +1369,7 @@
       `歩いた距離 ${cam.z.toFixed(0)} m`;
   }
   seedCanopy();
+  for (let i = 0; i < 6; i++) spawnPed(true);
   requestAnimationFrame(frame);
   if (location.hash === '#debug') window.__umb = { state, cam, cdrops, tips, cars, spawnCar, get audio() { return audio; } };
 
