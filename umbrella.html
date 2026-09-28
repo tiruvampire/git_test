@@ -194,6 +194,8 @@
     const z0 = b * 12;
     const blk = { z0, z1: z0 + 12, right: [], left: [], lamp: null, vend: null, cross: r(1) < 0.12 };
     // every sixth block a side street crosses our path: a crosswalk with pedestrian signals
+    // now and then a covered shopping arcade (アーケード) over the sidewalk, two blocks long
+    blk.arcade = b > 2 && (b % 9 === 6 || b % 9 === 7) && b % 6 !== 3;
     blk.inter = b > 0 && b % 6 === 3 ? { zg0: z0 + 3, zg1: z0 + 9, kind: r(300) < 0.5 ? 'cuckoo' : 'piyo', offset: r(301) * 30, sndT: 0 } : null;
     // right side (our side): 1–2 buildings with a shop on the ground floor
     const spans = blk.inter ? [[z0, z0 + 3], [z0 + 9, z0 + 12]] : [[z0, z0 + 12]];
@@ -241,6 +243,60 @@
       if (it && it.zg1 > cam.z && (!best || it.zg0 < best.zg0)) best = it;
     }
     return best;
+  }
+
+  const ARC_Y = 3.1, ARC_X0 = CURB - 0.1;
+  function inArcade(x, z) {
+    const blk = blocks.get(Math.floor(z / 12));
+    return !!(blk && blk.arcade && x > ARC_X0 && x < SIDE_R);
+  }
+  // the arcade: a ceiling with light tubes over the sidewalk, columns along the curb
+  function drawArcade(blk) {
+    const z0 = blk.z0, z1 = blk.z1;
+    const q = (x0, x1, za, zb, y) => {
+      const zn = cam.z + 0.25;
+      if (zb <= zn) return null;
+      za = Math.max(za, zn);
+      const a = proj(x0, y, za), ax = a.x, ay = a.y, b = proj(x1, y, za), bx = b.x, by = b.y;
+      const c = proj(x1, y, zb), cxx = c.x, cyy = c.y, d = proj(x0, y, zb);
+      return [ax, ay, bx, by, cxx, cyy, d.x, d.y];
+    };
+    ctx.fillStyle = 'rgb(26,27,33)';
+    let c = q(ARC_X0, SIDE_R, z0, z1, ARC_Y); if (c) fillQuad(c);
+    // fascia along the roof edge
+    ctx.fillStyle = 'rgb(38,40,48)';
+    c = wallQuad(ARC_X0, z0, z1, ARC_Y - 0.05, ARC_Y + 0.45); if (c) fillQuad(c);
+    for (let z = z0 + 2; z < z1; z += 4) {
+      // fluorescent tubes: bright strips on the ceiling, and real light sources
+      ctx.fillStyle = 'rgba(235,245,255,0.95)';
+      c = q(0.3, 0.45, z, z + 1.2, ARC_Y - 0.02); if (c) fillQuad(c);
+      lights.push({ x: 0.4, y: ARC_Y - 0.1, z: z + 0.6, col: '235,245,255', I: 6, size: 0.8, refl: 0.3 });
+      // columns at the curb
+      const zr = z - cam.z;
+      if (zr > 0.4) {
+        const a = proj(ARC_X0 + 0.05, 0, z), ax = a.x, ay = a.y, b = proj(ARC_X0 + 0.05, ARC_Y, z);
+        ctx.strokeStyle = 'rgb(34,36,44)'; ctx.lineWidth = Math.max(1, f * 0.12 / zr);
+        ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(b.x, b.y); ctx.stroke();
+      }
+    }
+  }
+  // roof drainage along the arcade edge: a curtain of drops falling onto the curb
+  const edgeDrips = [];
+  function updateArcadeEdge(dt) {
+    for (const blk of blocks.values()) {
+      if (!blk.arcade || blk.z1 < cam.z || blk.z0 > cam.z + 30) continue;
+      // Q per metre of edge = roof width × R; far too many drops to count — sample them
+      const n = Math.min(25, 1.4 * state.rateNow * dt * 12 * quality);
+      for (let k = 0; k < n; k++) {
+        if (Math.random() > n - k) break;
+        edgeDrips.push({ x: ARC_X0 - 0.02, y: ARC_Y, z: blk.z0 + Math.random() * 12, vy: -0.3 * Math.random(), D: 3 + Math.random() * 2 });
+      }
+    }
+    for (let i = edgeDrips.length - 1; i >= 0; i--) {
+      const d = edgeDrips[i];
+      d.vy -= G * dt; d.y += d.vy * dt;
+      if (d.y < 0 || d.z < cam.z) edgeDrips.splice(i, 1);
+    }
   }
 
   function inPuddle(x, z) {
@@ -805,6 +861,7 @@
       if (blk.inter) drawIntersection(blk.inter);
       drawBuildingSide(blk.right, SIDE_R, false, blk);
       if (blk.vend) drawVending(blk.vend);
+      if (blk.arcade) drawArcade(blk);
     }
     drawPeds();
   }
@@ -859,6 +916,7 @@
       d.y -= d.v * dt + dy;
       d.z += vz * dt;
       if (d.y <= -cam.y) { impact(d); spawnDrop(d, false); }
+      else if (d.y + cam.y < ARC_Y && inArcade(d.x + cam.x, d.z + cam.z)) spawnDrop(d, false);   // lands on the roof
       else if (d.z < ZN * 0.5 || d.x < d.xl - 3 || d.x > d.xr + 3) spawnDrop(d, false);
       else {
         const side = canopySide(d.x, d.y, d.z);
@@ -961,6 +1019,7 @@
     ctx.stroke(rp);
     for (const s of splashes) streak(s.x, s.y, s.z, s.vx, s.vy, s.vz - state.speed, s.D);
     for (const d of drops) streak(d.x, d.y, d.z, d.vx, -d.v, -state.speed, d.D);
+    for (const d of edgeDrips) streak(d.x - cam.x, d.y - cam.y, d.z - cam.z, 0, d.vy, -state.speed, d.D);
     flushBuckets();
   }
 
@@ -1056,7 +1115,7 @@
     d.a = Math.cbrt(1.5 * V / Math.PI);
     return d;
   }
-  let nextCanopyHit = 0, flutterPhase = 0;
+  let nextCanopyHit = 0, flutterPhase = 0, cover = 0, arcadeNear = 0;
   function seedCanopy() {
     for (let i = 0; i < 260; i++) {
       const spot = visibleCanopySpot();
@@ -1078,7 +1137,7 @@
     U.spin = spin;
     for (const t of tips) t.phi = t.phi0 + U.spin;
     // new beads: Poisson arrivals over the visible front half of the canopy
-    const lambda = 22 * Math.pow(state.rateNow, 0.75);
+    const lambda = 22 * Math.pow(state.rateNow, 0.75) * (1 - cover);
     nextCanopyHit -= dt;
     while (nextCanopyHit <= 0) {
       const spot = cdrops.length < 500 * quality ? visibleCanopySpot() : null;
@@ -1089,7 +1148,7 @@
       nextCanopyHit += -Math.log(1 - Math.random()) / lambda;
     }
     // continuous inflow to the rib tips from all the rain on each panel
-    const Qtip = Math.PI * U.R * U.R * state.rateNow / 3.6e6 / U.ribs;   // m³/s
+    const Qtip = Math.PI * U.R * U.R * state.rateNow * (1 - cover) / 3.6e6 / U.ribs;   // m³/s
     for (const t of tips) t.V += Qtip * dt;
 
     const ct = Math.cos(U.tilt), st = Math.sin(U.tilt), cr = Math.cos(U.roll), sr = Math.sin(U.roll);
@@ -1097,7 +1156,7 @@
     // Each simulated bead stands for the water on its share of the canopy: it keeps absorbing
     // the countless small drops landing there, dV/dt = R·A_share, until it is heavy enough to run.
     const share = 0.3 / Math.max(40, cdrops.length);                    // m² of visible canopy per bead
-    const dV = state.rateNow / 3.6e6 * share * 1e9 * dt;                // mm³ this frame
+    const dV = state.rateNow * (1 - cover) / 3.6e6 * share * 1e9 * dt;  // mm³ this frame
     for (const d of cdrops) {
       d.V += dV * (0.5 + d.pin * 0.5);
       d.a = Math.cbrt(1.5 * d.V / Math.PI);
@@ -1595,6 +1654,14 @@
     ];
     const roarGain = gainNode(0);
     loop(pink).connect(filter('lowpass', 500)).connect(roarGain).connect(street);
+    // the arcade roof (polycarbonate sheets on steel): stiffer and brighter than vinyl, 1.5 m
+    // overhead and more spread out; plus the curtain of drainage splashing on the curb
+    const roofGain = gainNode(0), curtainGain = gainNode(0);
+    const roofBus = filter('highpass', 500);
+    roofBus.connect(filter('peaking', 2600, 1.2, 5)).connect(roofGain).connect(master);
+    roofGain.connect(gainNode(0.5)).connect(verb);
+    players.push(texturePlayer(umbrellaRain(1400, 4), roofBus));
+    loop(white).connect(filter('bandpass', 1800, 0.7)).connect(curtainGain).connect(panner(-0.6, street));
     const windGain = gainNode(0), windBP = filter('bandpass', 200, 0.6);
     loop(pink).connect(windBP).connect(windGain).connect(street);
     // the canopy buffeting in the wind, right above the head
@@ -1659,8 +1726,11 @@
       const lvl = 0.2 + 0.8 * Math.sqrt(Math.min(1, R / 100));
       streetLight.gain.setTargetAtTime(Math.cos(x * Math.PI / 2) * lvl * 1.2 * 0.7, now, 0.4);
       streetHeavy.gain.setTargetAtTime(Math.sin(x * Math.PI / 2) * lvl * 0.7, now, 0.4);
-      umbLight.gain.setTargetAtTime(Math.cos(x * Math.PI / 2) * lvl * 1.3, now, 0.4);
-      umbHeavy.gain.setTargetAtTime(Math.sin(x * Math.PI / 2) * lvl, now, 0.4);
+      const open = 1 - cover;
+      umbLight.gain.setTargetAtTime(Math.cos(x * Math.PI / 2) * lvl * 1.3 * open, now, 0.12);
+      umbHeavy.gain.setTargetAtTime(Math.sin(x * Math.PI / 2) * lvl * open, now, 0.12);
+      roofGain.gain.setTargetAtTime(lvl * 0.7 * arcadeNear, now, 0.2);
+      curtainGain.gain.setTargetAtTime(0.25 * Math.sqrt(Math.min(1, R / 60)) * arcadeNear, now, 0.2);
       roarGain.gain.setTargetAtTime(0.1 * Math.sqrt(Math.min(1, R / 100)), now, 0.5);
       windGain.gain.setTargetAtTime(Math.min(1.3, 0.9 * (u / 12) ** 3), now, 0.15);
       windBP.frequency.setTargetAtTime(90 + u * 22, now, 0.15);
@@ -1825,6 +1895,14 @@
     updatePeds(dt);
     updateSignalSound(dt);
     updateFlash(dt);
+    updateArcadeEdge(dt);
+    cover += ((inArcade(cam.x, cam.z + 0.1) ? 1 : 0) - cover) * Math.min(1, dt / 0.15);
+    let an = 0;
+    for (const blk of blocks.values()) if (blk.arcade) {
+      const dz = Math.max(blk.z0 - cam.z, cam.z - blk.z1, 0);
+      an = Math.max(an, Math.exp(-dz / 6));
+    }
+    arcadeNear = an;
     if (audio) { audioT += dt; if (audioT > 0.1) { audio.update(); audioT = 0; } }
 
     const kf = Math.min(1, dt / 0.35);
