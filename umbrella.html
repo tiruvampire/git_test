@@ -87,6 +87,7 @@
   <div class="row"><span>音量</span><input id="volume" type="range" min="0" max="100" value="60"><span id="volumeVal"></span></div>
   <div class="buttons">
     <button id="walkBtn" class="on">歩く</button>
+    <button id="focusBtn">ピント: 街</button>
     <button id="windowBtn">窓辺へ</button>
   </div>
   <div id="stats"></div>
@@ -102,8 +103,10 @@
   const WALK_SPEED = 1.3;          // m/s, a relaxed walk
   const STEP_HZ = 1.9;             // steps per second
   const EXPOSURE = 0.03;           // s — motion-blur time of the eye
-  const APERTURE = 0.004;          // m — pupil diameter (depth of field)
-  const FOCUS = 9;                 // m — we look down the street
+  const APERTURE = 0.006;          // m — night-adapted pupil diameter (depth of field)
+  // Where the eye is focused: down the street (9 m) or on the umbrella (0.55 m).
+  // Accommodation takes a few hundred ms; looking at the umbrella we also tilt the head up.
+  let focusD = 9, focusNear = false, pitch = 0;
   const ZN = 0.35, ZF = 26;        // depth range of the simulated rain (m)
   const RHO = 1000, SIGMA = 0.072, MU = 0.001;
 
@@ -553,7 +556,7 @@
       ctx.beginPath();
       ctx.moveTo(x0, y0); ctx.lineTo(x0, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y2); ctx.lineTo(x1, y1); ctx.lineTo(x1, y0);
       ctx.closePath(); ctx.fill();
-      const coc = f * APERTURE * Math.abs(1 / zr - 1 / FOCUS);
+      const coc = f * APERTURE * Math.abs(1 / zr - 1 / focusD);
       const col = c.oncoming ? '255,246,228' : '255,40,28';
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
@@ -878,7 +881,7 @@
     if (z < 0.15 || z2 < 0.15) return;
     const s1x = cx + f * x / z, s1y = cy - f * y / z, s2x = cx + f * x2 / z2, s2y = cy - f * y2 / z2;
     if ((s1x < 0 && s2x < 0) || (s1x > W && s2x > W) || (s1y < 0 && s2y < 0) || s2y > H) return;
-    const wPhys = f * D * 1e-3 / z, coc = f * APERTURE * Math.abs(1 / z - 1 / FOCUS);
+    const wPhys = f * D * 1e-3 / z, coc = f * APERTURE * Math.abs(1 / z - 1 / focusD);
     const width = Math.max(0.5, wPhys) + coc;
     const speed = Math.max(0.3, Math.hypot(vx, vy, vz));
     illuminate(x, y, z);
@@ -978,17 +981,29 @@
     return [Math.asin(r / U.Rs), Math.atan2(x1, z2)];
   }
 
+  // rain lands everywhere, but we only simulate beads on the part of the canopy we can see
+  function visibleCanopySpot() {
+    for (let k = 0; k < 8; k++) {
+      const phi = (Math.random() - 0.5) * 2.6, th = Math.acos(1 - Math.random() * (1 - Math.cos(U.thR)));
+      const t = Math.min(th, rimTheta(phi) - 0.01), p = canopyPoint(t, phi);
+      if (p[2] < 0.08) continue;
+      const sx = cx + f * p[0] / p[2], sy = cy - f * p[1] / p[2];
+      if (sx > -10 && sx < W + 10 && sy > -10 && sy < H) return [t, phi];
+    }
+    return null;
+  }
   function makeCDrop(th, phi, V) {
-    const d = { th, phi, V, a: 0, moving: false, speed: 0, pin: 0.8 + Math.random() * 0.45, dead: false };
+    const d = { th, phi, V, a: 0, moving: false, speed: 0, pin: 0.8 + Math.random() * 0.45, dead: false, fresh: true };
     d.a = Math.cbrt(1.5 * V / Math.PI);
     return d;
   }
   let nextCanopyHit = 0;
   function seedCanopy() {
-    for (let i = 0; i < 220; i++) {
-      const phi = (Math.random() - 0.5) * 2.6, th = Math.acos(1 - Math.random() * (1 - Math.cos(U.thR)));
-      const D = sampleD(state.rateNow) * (0.6 + Math.random() * 0.8);
-      cdrops.push(makeCDrop(Math.min(th, rimTheta(phi) - 0.01), phi, Math.PI / 6 * D ** 3));
+    for (let i = 0; i < 260; i++) {
+      const spot = visibleCanopySpot();
+      if (!spot) continue;
+      const D = sampleD(state.rateNow) * (0.8 + Math.random() * 1.2);
+      cdrops.push(makeCDrop(spot[0], spot[1], Math.PI / 6 * D ** 3));
     }
   }
   function updateCanopy(dt) {
@@ -998,14 +1013,13 @@
     U.spin = spin;
     for (const t of tips) t.phi = t.phi0 + U.spin;
     // new beads: Poisson arrivals over the visible front half of the canopy
-    const lambda = 9 * Math.pow(state.rateNow, 0.75);
+    const lambda = 22 * Math.pow(state.rateNow, 0.75);
     nextCanopyHit -= dt;
     while (nextCanopyHit <= 0) {
-      if (cdrops.length < 500 * quality) {
-        const th = Math.acos(1 - Math.random() * (1 - Math.cos(U.thR)));   // uniform over the cap
-        const phi = (Math.random() - 0.5) * 2.6;
+      const spot = cdrops.length < 500 * quality ? visibleCanopySpot() : null;
+      if (spot) {
         const D = sampleD(state.rateNow);
-        cdrops.push(makeCDrop(Math.min(th, rimTheta(phi) - 0.01), phi, Math.PI / 6 * D ** 3 * (0.8 + Math.random())));
+        cdrops.push(makeCDrop(spot[0], spot[1], Math.PI / 6 * D ** 3 * (0.8 + Math.random())));
       }
       nextCanopyHit += -Math.log(1 - Math.random()) / lambda;
     }
@@ -1015,7 +1029,13 @@
 
     const ct = Math.cos(U.tilt), st = Math.sin(U.tilt), cr = Math.cos(U.roll), sr = Math.sin(U.roll);
     const Uw = 0.3 * state.wind;
+    // Each simulated bead stands for the water on its share of the canopy: it keeps absorbing
+    // the countless small drops landing there, dV/dt = R·A_share, until it is heavy enough to run.
+    const share = 0.3 / Math.max(40, cdrops.length);                    // m² of visible canopy per bead
+    const dV = state.rateNow / 3.6e6 * share * 1e9 * dt;                // mm³ this frame
     for (const d of cdrops) {
+      d.V += dV * (0.5 + d.pin * 0.5);
+      d.a = Math.cbrt(1.5 * d.V / Math.PI);
       // gravity along the curved surface: project g onto the local tangents e_θ, e_φ
       const sT = Math.sin(d.th), cT = Math.cos(d.th), sP = Math.sin(d.phi), cP = Math.cos(d.phi);
       const rot = (x, y, z) => { const y2 = y * ct - z * st; return [x * cr - y2 * sr, x * sr + y2 * cr]; };  // (x', y') after tilt & roll
@@ -1050,7 +1070,8 @@
     // merge touching beads (volume conserved)
     for (let i = 0; i < cdrops.length; i++) {
       const a = cdrops[i];
-      if (a.dead || !a.moving) continue;
+      if (a.dead || !(a.moving || a.fresh)) continue;
+      a.fresh = false;
       for (let j = 0; j < cdrops.length; j++) {
         if (i === j) continue;
         const b = cdrops[j];
@@ -1124,7 +1145,7 @@
       ctx.fillRect(sx - r, sy - r, r * 2, r * 2);
     }
     // 2. beads on the vinyl — out of focus (we look at the street), each a tiny lens
-    const coc = (z) => f * APERTURE * Math.abs(1 / z - 1 / FOCUS);
+    const coc = (z) => f * APERTURE * Math.abs(1 / z - 1 / focusD);
     for (const d of cdrops) {
       const p = canopyPoint(d.th, d.phi);
       if (p[2] < 0.05) continue;
@@ -1132,6 +1153,26 @@
       if (sx < -20 || sx > W + 20 || sy < -20 || sy > H) continue;
       const r = f * d.a * 1e-3 / p[2], b = coc(p[2]);
       const R = r + b * 0.5;
+      if (b < 1.5 && r > 1.2 && snapC.width > 1) {
+        // in focus: a sessile drop is a small ball lens — the scene appears inverted inside it,
+        // with a dark rim (total internal reflection) and a bright specular point
+        const k = snapC.width / W, S = r * 2 * 7;
+        ctx.save();
+        ctx.beginPath(); ctx.arc(sx, sy, r, 0, TAU); ctx.clip();
+        ctx.translate(sx, sy); ctx.scale(-1, -1);
+        ctx.drawImage(snapC, clamp((sx - S / 2) * k, 0, snapC.width - S * k), clamp((sy - S / 2) * k, 0, snapC.height - S * k), S * k, S * k, -r, -r, r * 2, r * 2);
+        ctx.restore();
+        // light gathered by the lens brightens it; the rim goes dark; the lower edge catches
+        // a caustic from the lights below; a sharp specular glint on top
+        const rg = ctx.createRadialGradient(sx, sy, 0, sx, sy, r);
+        rg.addColorStop(0, 'rgba(210,220,240,0.18)'); rg.addColorStop(0.6, 'rgba(0,0,0,0)'); rg.addColorStop(1, 'rgba(5,8,14,0.5)');
+        ctx.fillStyle = rg; ctx.beginPath(); ctx.arc(sx, sy, r, 0, TAU); ctx.fill();
+        ctx.strokeStyle = 'rgba(255,230,200,0.35)'; ctx.lineWidth = Math.max(0.5, r * 0.18);
+        ctx.beginPath(); ctx.arc(sx, sy, r * 0.8, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.beginPath(); ctx.arc(sx - r * 0.3, sy - r * 0.35, Math.max(0.6, r * 0.2), 0, TAU); ctx.fill();
+        continue;
+      }
       const gr = ctx.createRadialGradient(sx, sy - r * 0.3, 0, sx, sy, R);
       gr.addColorStop(0, `rgba(240,244,255,${(0.6 / (1 + b * 0.1)).toFixed(3)})`);
       gr.addColorStop(0.45, `rgba(170,185,210,${(0.28 / (1 + b * 0.1)).toFixed(3)})`);
@@ -1544,6 +1585,11 @@
     updateSignalSound(dt);
     if (audio) { audioT += dt; if (audioT > 0.1) { audio.update(); audioT = 0; } }
 
+    const kf = Math.min(1, dt / 0.35);
+    focusD = Math.exp(Math.log(focusD) + (Math.log(focusNear ? 0.55 : 9) - Math.log(focusD)) * kf);
+    pitch += ((focusNear ? 0.22 : 0) - pitch) * Math.min(1, dt / 0.6);
+    cy = cy0 + f * Math.tan(pitch);
+
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     drawSky();
     drawGround();
@@ -1553,7 +1599,9 @@
     // rain scatters light: the street fades into haze
     ctx.fillStyle = `rgba(55,60,75,${(0.25 * (1 - Math.exp(-state.rateNow / 40))).toFixed(3)})`;
     ctx.fillRect(0, 0, W, H);
+    blurScene();
     drawRain();
+    takeSnapshot();
     drawUmbrella();
     ctx.drawImage(vignette, 0, 0, W, H);
 
@@ -1562,13 +1610,42 @@
     requestAnimationFrame(frame);
   }
 
-  let vignette;
+  // defocus of the whole street when the eye accommodates to the umbrella: circle of
+  // confusion b = f·A·|1/z − 1/z_f| for z ≈ 12 m, approximated by down/up-sampling
+  // (two resampling stages each way, so the bilinear filter approximates a smooth kernel)
+  const blurC = document.createElement('canvas'), blurX = blurC.getContext('2d');
+  const midC = document.createElement('canvas'), midX = midC.getContext('2d');
+  function blurScene() {
+    const b = f * APERTURE * Math.abs(1 / 12 - 1 / focusD);
+    if (b < 1.2) return;
+    const sc = clamp(1.6 / b, 0.05, 1), sm = Math.min(1, sc * 2.2);
+    const w = Math.max(1, Math.round(canvas.width * sc)), h = Math.max(1, Math.round(canvas.height * sc));
+    const mw = Math.max(1, Math.round(canvas.width * sm)), mh = Math.max(1, Math.round(canvas.height * sm));
+    if (blurC.width !== w || blurC.height !== h) { blurC.width = w; blurC.height = h; }
+    if (midC.width !== mw || midC.height !== mh) { midC.width = mw; midC.height = mh; }
+    midX.drawImage(canvas, 0, 0, mw, mh);
+    blurX.drawImage(midC, 0, 0, w, h);
+    midX.drawImage(blurC, 0, 0, mw, mh);
+    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(midC, 0, 0, canvas.width, canvas.height);
+    ctx.restore();
+  }
+  // a half-resolution copy of the scene for the beads to refract
+  const snapC = document.createElement('canvas'), snapX = snapC.getContext('2d');
+  function takeSnapshot() {
+    if (focusD > 2) return;
+    const w = canvas.width >> 1, h = canvas.height >> 1;
+    if (snapC.width !== w || snapC.height !== h) { snapC.width = w; snapC.height = h; }
+    snapX.drawImage(canvas, 0, 0, w, h);
+  }
+
+  let vignette, cy0 = 0;
   function resize() {
     DPR = Math.min(window.devicePixelRatio || 1, 2);
     W = window.innerWidth; H = window.innerHeight;
     canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
     f = 0.62 * Math.hypot(W, H);
-    cx = W / 2; cy = H * 0.56;
+    cx = W / 2; cy0 = cy = H * 0.56;
     vignette = mkCanvas(W, H);
     const v = vignette.getContext('2d');
     const gr = v.createRadialGradient(W / 2, H * 0.5, Math.min(W, H) * 0.35, W / 2, H * 0.5, Math.hypot(W, H) * 0.62);
@@ -1621,6 +1698,11 @@
   });
   $('toggle').addEventListener('click', () => $('panel').classList.toggle('hidden'));
   $('walkBtn').addEventListener('click', () => setWalking(!state.walking));
+  $('focusBtn').addEventListener('click', e => {
+    focusNear = !focusNear;
+    e.currentTarget.textContent = focusNear ? 'ピント: 傘' : 'ピント: 街';
+    e.currentTarget.classList.toggle('on', focusNear);
+  });
   $('windowBtn').addEventListener('click', () => { location.href = 'index.html'; });
 
   let touchStart = null;
