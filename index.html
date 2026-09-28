@@ -439,7 +439,7 @@
   function targetDropCount() {
     const c = Math.abs(Math.cos(state.theta)), sn = Math.abs(Math.sin(state.theta));
     const area = (W * c + H * sn) * (W * sn + H * c);
-    return Math.min(4000, 1.6 * visibleDensity(state.rateNow) * area / (390 * 844));
+    return quality * Math.min(4000, 1.6 * visibleDensity(state.rateNow) * area / (390 * 844));
   }
 
   const RHO = 1000, SIGMA = 0.072, MU = 0.001;   // water: density, surface tension, viscosity (SI)
@@ -454,7 +454,7 @@
   function impact(d) {
     if (d.z > 12) return;
     const puddle = inPuddle(d.x, d.z);
-    if (puddle && ripples.length < 320) {
+    if (puddle && ripples.length < 320 * quality) {
       // ripple energy ∝ drop kinetic energy; amplitude ∝ √E
       const E = d.D ** 3 * d.v * d.v;
       ripples.push({ x: d.x, z: d.z, age: 0, amp: Math.min(1, Math.sqrt(E) / 40), D: d.D });
@@ -467,7 +467,7 @@
     const K = We * Math.pow(Oh, -0.4);
     const film = puddle ? 5 : 0.3;                          // mm of water
     const Kc = 2100 + 5880 * Math.pow(Math.min(film / d.D, 1.5), 1.44);
-    if (d.z < 7 && K > Kc && splashes.length < 700) {
+    if (d.z < 7 && K > Kc && splashes.length < 700 * quality) {
       // crown splash: secondary droplets from the crown rim, thrown out ballistically;
       // more energetic impacts eject more (and relatively smaller) droplets
       const ex = K / Kc - 1;
@@ -702,7 +702,7 @@
     const lambda = 4 * Math.pow(state.rateNow, 0.75) * (0.35 + Math.abs(state.wind) / 6) * (W * H) / (390 * 844);
     nextGlassHit -= dt;
     while (nextGlassHit <= 0) {
-      if (glassDrops.length < 650) glassImpact();
+      if (glassDrops.length < 650 * quality) glassImpact();
       nextGlassHit += -Math.log(1 - Math.random()) / lambda;
     }
 
@@ -846,6 +846,10 @@
       if (d.r < 1.6) {
         small.moveTo(d.x + d.r, d.y);
         small.arc(d.x, d.y, d.r, 0, TAU);
+        continue;
+      }
+      if (d.r < 2.6 && !d.moving) {              // too small for the lens image to be visible
+        ctx.drawImage(shade, d.x - d.r, d.y - d.r, d.r * 2, d.r * 2);
         continue;
       }
       // sliding drops: round advancing head, receding tail stretched behind (teardrop);
@@ -1241,12 +1245,16 @@
   }
 
   // ---------- Resize ----------
-  function resize() {
-    DPR = Math.min(window.devicePixelRatio || 1, 2);
-    W = window.innerWidth; H = window.innerHeight;
+  let renderScale = 1;
+  function sizeCanvases() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2) * renderScale;
     canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
     trail.width = canvas.width; trail.height = canvas.height;
     tctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  function resize() {
+    W = window.innerWidth; H = window.innerHeight;
+    sizeCanvases();
     B = Math.ceil(Math.hypot(W, H)) + 8;
     ox = (B - W) / 2; oy = (B - H) / 2;
     f = 0.62 * Math.hypot(W, H);
@@ -1296,6 +1304,7 @@
   let last = performance.now(), time = 0, nextAutoBolt = 10, plinkAcc = 0, audioT = 0, statsT = 0;
 
   function frame(now) {
+    adaptQuality(now - last);
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now; time += dt;
 
@@ -1327,6 +1336,23 @@
   }
 
   let hazeStyle = 'rgba(0,0,0,0)';
+  // Adaptive quality: compare the frame time with the display's own refresh interval
+  // (the fastest we have seen) and shed or restore detail to stay smooth on older phones.
+  let quality = 1, ftAvg = 16.7, ftBase = 1000, qualityT = 0;
+  function adaptQuality(ms) {
+    if (ms <= 0 || ms > 250) return;                         // tab switches, hiccups
+    ftAvg += (ms - ftAvg) * 0.08;
+    ftBase = Math.min(17.5, ftBase * 1.0005, ftAvg);         // displays refresh at ≥ 60 Hz
+    qualityT += ms / 1000;
+    if (qualityT < 1) return;
+    qualityT = 0;
+    if (ftAvg > ftBase * 1.22 && quality > 0.35) quality *= 0.85;
+    else if (ftAvg < ftBase * 1.08 && quality < 1) quality = Math.min(1, quality * 1.04);
+    // last resort: fewer pixels (GPU fill rate), restored once there is headroom again
+    const want = quality < 0.45 ? 0.7 : quality > 0.9 ? 1 : renderScale;
+    if (want !== renderScale) { renderScale = want; sizeCanvases(); }
+  }
+
   function render() {
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     ctx.save();
@@ -1383,7 +1409,8 @@
     statsEl.innerHTML =
       `降水強度 ${R.toFixed(1)} mm/h（${rainClass(R)}）・風速 ${state.wind.toFixed(1)} m/s<br>` +
       `平均雨滴径 ${meanD.toFixed(2)} mm・終端速度 ${termVel(meanD).toFixed(1)} m/s・` +
-      `描画中の雨滴 ${drops.length} / 窓 ${glassDrops.length}`;
+      `描画中の雨滴 ${drops.length} / 窓 ${glassDrops.length}` +
+      (quality < 0.98 ? `・描画品質 ${Math.round(quality * 100)}%` : '');
     if (thunderInfo) {
       const el = (performance.now() - thunderInfo.t0) / 1000, eta = thunderInfo.rmin / SOUND_SPEED;
       const km = (thunderInfo.d / 1000).toFixed(1);
