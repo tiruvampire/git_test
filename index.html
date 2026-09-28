@@ -921,12 +921,13 @@
     if (!AC) return null;
     const ac = new AC();
     const sr = ac.sampleRate;
+    const rnd = Math.random;
 
     function noiseBuf(sec, pink) {
       const buf = ac.createBuffer(1, sr * sec, sr), d = buf.getChannelData(0);
       let b0 = 0, b1 = 0, b2 = 0;
       for (let i = 0; i < d.length; i++) {
-        const w = Math.random() * 2 - 1;
+        const w = rnd() * 2 - 1;
         if (!pink) { d[i] = w * 0.5; continue; }
         b0 = 0.99765 * b0 + w * 0.0990460;
         b1 = 0.96300 * b1 + w * 0.2965164;
@@ -936,48 +937,145 @@
       return buf;
     }
     const white = noiseBuf(2, false), pink = noiseBuf(4, true);
+    const loop = buf => { const s = ac.createBufferSource(); s.buffer = buf; s.loop = true; s.start(0, rnd() * buf.duration); return s; };
+    const filter = (type, freq, Q = 0.7, gain = 0) => {
+      const b = ac.createBiquadFilter(); b.type = type; b.frequency.value = freq; b.Q.value = Q; b.gain.value = gain; return b;
+    };
+    const gainNode = v => { const g = ac.createGain(); g.gain.value = v; return g; };
 
+    // ---- mixing graph ----------------------------------------------------------------
+    //  outdoor sources ─▶ outdoor ─┬───────────────▶ mix ─┬─▶ open window ────────────▶ master
+    //                              └▶ street reverb ▶ mix └─▶ glass pane (mass law) ─▶ master
+    //  sounds made on the pane itself (drop ticks, wind at the frame) ─────────────────▶ master
     const comp = ac.createDynamicsCompressor();
-    comp.threshold.value = -14; comp.ratio.value = 4;
-    const master = ac.createGain();
+    comp.threshold.value = -12; comp.ratio.value = 3;
+    const master = gainNode(state.volume);
     master.connect(comp).connect(ac.destination);
 
-    const loop = buf => { const s = ac.createBufferSource(); s.buffer = buf; s.loop = true; s.start(0, Math.random() * buf.duration); return s; };
-    const filter = (type, freq, Q = 0.7) => { const b = ac.createBiquadFilter(); b.type = type; b.frequency.value = freq; b.Q.value = Q; return b; };
+    const outdoor = gainNode(1), mix = gainNode(1);
+    outdoor.connect(mix);
 
-    const bedLP = filter('lowpass', 3000), bedGain = ac.createGain();
-    loop(pink).connect(filter('highpass', 300)).connect(bedLP).connect(bedGain).connect(master);
-    const hissGain = ac.createGain();
-    loop(white).connect(filter('highpass', 5000)).connect(hissGain).connect(master);
-    const windLP = filter('lowpass', 250, 2.5), windGain = ac.createGain();
-    windGain.gain.value = 0;
-    loop(pink).connect(windLP).connect(windGain).connect(master);
-
-    function out(node, pan) {
-      if (ac.createStereoPanner) {
-        const p = ac.createStereoPanner(); p.pan.value = clamp(pan, -1, 1);
-        node.connect(p).connect(master);
-      } else node.connect(master);
+    // Street-canyon reverb: synthetic impulse response with discrete early reflections from the
+    // facade opposite (14 m → 82 ms), the ground, and a diffuse tail with RT60 ≈ 1.3 s
+    const ir = ac.createBuffer(2, Math.floor(sr * 2.2), sr);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = ir.getChannelData(ch);
+      const rt60 = 1.3, k = 6.91 / (rt60 * sr);
+      for (let i = 0; i < d.length; i++) d[i] = (rnd() * 2 - 1) * Math.exp(-k * i) * 0.35 * Math.min(1, i / (0.03 * sr));
+      for (const [ms, a] of [[18, 0.5], [82, 0.6], [97, 0.35], [164, 0.3], [190, 0.22], [246, 0.15]]) {
+        const i = Math.floor((ms + (ch ? 3 : 0)) * sr / 1000);
+        if (i < d.length) d[i] += a * (ch ? 0.9 : 1);
+      }
     }
+    const verb = ac.createConvolver();
+    verb.buffer = ir;
+    const verbSend = gainNode(0.28);
+    outdoor.connect(verbSend).connect(verb).connect(mix);
 
-    // A drop hitting a puddle traps a small air bubble that rings at its
-    // Minnaert resonance: f ≈ 3.26 / a (a = bubble radius in m) — the "plink" of rain
+    // Mass law: a 5 mm pane (m ≈ 12.5 kg/m²) transmits less and less as frequency rises,
+    // TL ≈ 20·log10(m·f) − 47 dB → a 6 dB/octave (first-order) low-pass, plus a transmission
+    // bump near the coincidence frequency f_c ≈ 12 000 / h[mm] ≈ 2.4 kHz
+    const open = gainNode(state.glass ? 0 : 1), pane = gainNode(state.glass ? 1 : 0);
+    let paneLP;
+    const fc = 320, K = Math.tan(Math.PI * fc / sr);
+    try { paneLP = ac.createIIRFilter([K / (1 + K), K / (1 + K)], [1, (K - 1) / (K + 1)]); }
+    catch (_) { paneLP = filter('lowpass', fc, 0.5); }
+    mix.connect(open).connect(master);
+    mix.connect(paneLP).connect(filter('peaking', 2400, 1.4, 7)).connect(gainNode(0.9)).connect(pane).connect(master);
+
+    const panner = (pan, dest) => {
+      if (!ac.createStereoPanner) return dest;
+      const p = ac.createStereoPanner(); p.pan.value = clamp(pan, -1, 1); p.connect(dest); return p;
+    };
+
+    // ---- granular rain bed ---------------------------------------------------------------
+    // Built from thousands of individual impacts rather than filtered noise. Impacts are spread
+    // over the street with pdf ∝ r (ring area), amplitude ∝ D^1.5 / r, and air/ground absorption
+    // dulls distant ones. On asphalt a drop makes a short broadband splat; in a puddle it may
+    // entrain a bubble ringing at the Minnaert frequency — 1 mm drops make the characteristic
+    // ~14 kHz "type I" bubbles (Pumphrey & Crum), larger drops 2–6 kHz ones.
+    function rainBuffer(lambda, sec) {
+      const len = Math.floor(sr * sec), buf = ac.createBuffer(2, len, sr);
+      const L = buf.getChannelData(0), R = buf.getChannelData(1);
+      const n = Math.floor(lambda * sec);
+      for (let e = 0; e < n; e++) {
+        const t0 = Math.floor(rnd() * len);
+        const r = Math.sqrt(16 + rnd() * (1600 - 16));    // 4 … 40 m
+        const D = 0.5 - Math.log(1 - rnd()) * 0.6;
+        const amp = Math.pow(D, 1.5) / r;
+        const fcut = clamp(16000 * 12 / r, 1200, 16000), a1 = Math.exp(-TAU * fcut / sr);
+        const az = (rnd() - 0.5) * Math.PI, gl = Math.cos(az / 2 + Math.PI / 4), gr = Math.sin(az / 2 + Math.PI / 4);
+        let y = 0;
+        if (rnd() < 0.2) {
+          const typeI = D > 0.8 && D < 1.2 && rnd() < 0.6;
+          const f0 = typeI ? 12500 + rnd() * 3500 : 3260 / (0.5 + rnd() * 1.0);
+          const tau = 1 / (Math.PI * f0 * 0.045);                 // radiation + thermal damping δ ≈ 0.045
+          const m = Math.floor(tau * 5 * sr);
+          for (let k = 0; k < m; k++) {
+            const t = k / sr;
+            const v = Math.sin(TAU * f0 * t * (1 + 0.15 * t / (tau * 5))) * Math.exp(-t / tau) * amp * 0.6;
+            y = y * a1 + v * (1 - a1);
+            const i = (t0 + k) % len;
+            L[i] += y * gl; R[i] += y * gr;
+          }
+        } else {
+          const m = Math.floor((0.0015 + 0.0015 * D) * sr), tau = m / 4;
+          for (let k = 0; k < m; k++) {
+            const v = (rnd() * 2 - 1) * Math.exp(-k / tau) * amp;
+            y = y * a1 + v * (1 - a1);
+            const i = (t0 + k) % len;
+            L[i] += y * gl; R[i] += y * gr;
+          }
+        }
+      }
+      // normalise loudness (RMS), not peak: sparse impact trains have a high crest factor
+      let ss = 0;
+      for (let i = 0; i < len; i++) ss += L[i] * L[i] + R[i] * R[i];
+      const norm = 0.12 / (Math.sqrt(ss / (2 * len)) || 1);
+      for (let i = 0; i < len; i++) { L[i] = Math.tanh(L[i] * norm); R[i] = Math.tanh(R[i] * norm); }
+      return buf;
+    }
+    const lightGain = gainNode(0), heavyGain = gainNode(0);
+    const lightSrc = ac.createBufferSource(), heavySrc = ac.createBufferSource();
+    lightSrc.buffer = rainBuffer(700, 5); lightSrc.loop = true;
+    heavySrc.buffer = rainBuffer(6000, 4); heavySrc.loop = true;
+    lightSrc.connect(lightGain).connect(outdoor);
+    heavySrc.connect(heavyGain).connect(outdoor);
+    lightSrc.start(); heavySrc.start();
+    // distant rain on roofs and the whole city merges into a low roar
+    const roarGain = gainNode(0);
+    loop(pink).connect(filter('lowpass', 500)).connect(roarGain).connect(outdoor);
+
+    // ---- wind ------------------------------------------------------------------------------
+    // Aerodynamic (dipole) sound power grows ∝ U⁶ (Curle), so amplitude ∝ U³.
+    // Flow past a cylinder sheds vortices at f = St·U/d (St ≈ 0.2): power lines (d ≈ 6 mm)
+    // and the window frame (d ≈ 25 mm) sing Aeolian tones that follow the gusts.
+    const windGain = gainNode(0), windBP = filter('bandpass', 200, 0.6);
+    loop(pink).connect(windBP).connect(windGain).connect(outdoor);
+    const aeolian = [0.006, 0.025].map((d, i) => {
+      const bp = filter('bandpass', 400, 30), g = gainNode(0);
+      loop(white).connect(bp).connect(g).connect(i ? master : outdoor);
+      return { d, bp, g };
+    });
+
+    // A drop hitting a nearby puddle: a single bubble at its Minnaert resonance f ≈ 3.26 / a
     function plink() {
-      const a = 0.4 + Math.random() ** 2 * 1.1;   // mm
+      const a = 0.4 + rnd() ** 2 * 1.1;   // mm
       const fr = 3260 / a;
-      const t = ac.currentTime + Math.random() * 0.02;
+      const t = ac.currentTime + rnd() * 0.02;
       const o = ac.createOscillator();
       o.frequency.setValueAtTime(fr, t);
       o.frequency.exponentialRampToValueAtTime(fr * 1.25, t + 0.04);
       const g = ac.createGain();
-      const amp = 0.012 + Math.random() * 0.045, dur = 0.02 + a * 0.02;
+      const amp = 0.01 + rnd() * 0.035, dur = 0.02 + a * 0.02;
       g.gain.setValueAtTime(0.0001, t);
       g.gain.exponentialRampToValueAtTime(amp, t + 0.002);
       g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-      o.connect(g); out(g, Math.random() * 1.6 - 0.8);
+      o.connect(g).connect(panner(rnd() * 1.6 - 0.8, outdoor));
       o.start(t); o.stop(t + dur + 0.02);
     }
 
+    // A drop striking the pane right in front of you: heard directly, not through the glass
     let tickBudget = 0, lastTick = 0;
     function tick(D, pan) {
       const t = ac.currentTime;
@@ -986,53 +1084,54 @@
       tickBudget++;
       const s = ac.createBufferSource(); s.buffer = white;
       const g = ac.createGain();
-      g.gain.setValueAtTime(Math.min(0.5, 0.05 * D * D), t);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.03 + 0.01 * D);
-      s.connect(filter('bandpass', 1500 + 4000 / D, 1.2)).connect(g);
-      out(g, pan);
-      s.start(t, Math.random() * 1.5, 0.1);
+      g.gain.setValueAtTime(Math.min(0.35, 0.035 * D * D), t);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.025 + 0.008 * D);
+      s.connect(filter('bandpass', 1800 + 3500 / D, 1.3)).connect(g).connect(panner(pan, master));
+      s.start(t, rnd() * 1.5, 0.1);
     }
 
     // Thunder arrives after d / 343 s; air absorbs high frequencies with distance,
     // and the long channel makes a rumble instead of a single bang
     function thunder(d) {
       const t0 = ac.currentTime + d / SOUND_SPEED;
-      const dur = 2 + d / 1500 + Math.random() * 1.5;
+      const dur = 2 + d / 1500 + rnd() * 1.5;
       const amp = Math.min(1.6, 700 / d);
       const s = loop(pink);
       const g = ac.createGain();
       g.gain.setValueAtTime(0.0001, ac.currentTime);
       g.gain.setValueAtTime(0.0001, t0);
       g.gain.exponentialRampToValueAtTime(amp, t0 + (d < 1200 ? 0.03 : 0.3));
-      const n = 3 + (Math.random() * 4 | 0), step = dur * 0.7 / (n + 1);
+      const n = 3 + (rnd() * 4 | 0), step = dur * 0.7 / (n + 1);
       for (let i = 0; i < n; i++) {
-        g.gain.exponentialRampToValueAtTime(amp * (0.25 + Math.random() * 0.6) * (1 - i / n * 0.5),
-          t0 + 0.3 + (i + 1) * step + Math.random() * step * 0.4);
+        g.gain.exponentialRampToValueAtTime(amp * (0.25 + rnd() * 0.6) * (1 - i / n * 0.5),
+          t0 + 0.3 + (i + 1) * step + rnd() * step * 0.4);
       }
       g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-      s.connect(filter('lowpass', clamp(250000 / d, 90, 1200))).connect(g).connect(master);
+      s.connect(filter('lowpass', clamp(250000 / d, 90, 1200))).connect(g).connect(outdoor);
       s.stop(t0 + dur + 0.1);
-      if (d < 1500) {
-        const c = ac.createBufferSource(); c.buffer = white;
-        const cg = ac.createGain();
-        cg.gain.setValueAtTime(amp * 0.7, t0);
-        cg.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.3);
-        c.connect(filter('highpass', 800)).connect(cg).connect(master);
-        c.start(t0, 0, 0.4);
-      }
     }
 
     function update() {
-      const now = ac.currentTime, r = Math.min(1, Math.sqrt(state.rateNow / 60)), u = Math.abs(state.wind);
+      const now = ac.currentTime, R = state.rateNow, u = Math.abs(state.wind);
       master.gain.setTargetAtTime(state.volume, now, 0.1);
-      bedGain.gain.setTargetAtTime((0.1 + 0.9 * r) * (state.glass ? 0.8 : 1), now, 0.3);
-      bedLP.frequency.setTargetAtTime((state.glass ? 1200 : 1800) + 4000 * r, now, 0.3);
-      hissGain.gain.setTargetAtTime((0.02 + 0.15 * r) * (state.glass ? 0.5 : 1), now, 0.3);
-      windGain.gain.setTargetAtTime(Math.min(1.2, (u / 12) ** 2 * 1.2), now, 0.2);
-      windLP.frequency.setTargetAtTime(150 + u * 25, now, 0.2);
+      open.gain.setTargetAtTime(state.glass ? 0 : 1, now, 0.25);
+      pane.gain.setTargetAtTime(state.glass ? 1 : 0, now, 0.25);
+      // acoustic power ∝ number of impacts ∝ R; blend a sparse and a dense texture by log R
+      const x = clamp(Math.log(R / 0.3) / Math.log(100 / 0.3), 0, 1);
+      const lvl = 0.2 + 0.8 * Math.sqrt(Math.min(1, R / 100));
+      lightGain.gain.setTargetAtTime(Math.cos(x * Math.PI / 2) * lvl * 1.4, now, 0.4);
+      heavyGain.gain.setTargetAtTime(Math.sin(x * Math.PI / 2) * lvl, now, 0.4);
+      roarGain.gain.setTargetAtTime(0.12 * Math.sqrt(Math.min(1, R / 100)), now, 0.5);
+      const w3 = Math.min(1.5, (u / 12) ** 3);
+      windGain.gain.setTargetAtTime(0.9 * w3, now, 0.15);
+      windBP.frequency.setTargetAtTime(90 + u * 22, now, 0.15);
+      for (const a of aeolian) {
+        a.bp.frequency.setTargetAtTime(clamp(0.2 * Math.max(u, 0.5) / a.d, 40, 4000), now, 0.12);
+        a.g.gain.setTargetAtTime(u > 4 ? 0.9 * w3 : 0, now, 0.2);
+      }
     }
     update();
-    return { ac, plink, tick, thunder, update };
+    return { ac, master, plink, tick, thunder, update };
   }
 
   // ---------- Resize ----------
@@ -1170,6 +1269,7 @@
   }
 
   requestAnimationFrame(frame);
+  if (location.hash === '#debug') window.__rain = { state, get audio() { return audio; } };
 
   // ---------- UI ----------
   const $ = id => document.getElementById(id);
