@@ -97,6 +97,7 @@
     <button id="thunderBtn">雷</button>
     <button id="timerBtn">タイマー</button>
     <button id="swayBtn" class="on">揺れ</button>
+    <button id="lookBtn">見回す</button>
     <button id="windowBtn">窓辺へ</button>
   </div>
   <div id="stats"></div>
@@ -2191,10 +2192,13 @@
     focusD = Math.exp(Math.log(focusD) + (Math.log(focusNear ? 0.55 : 9) - Math.log(focusD)) * kf);
     pitch += ((focusNear ? 0.22 : 0) - pitch) * Math.min(1, dt / 0.6);
     cy = cy0 + f * Math.tan(pitch);
-    // standing still, the gaze wanders a little (a slow look around)
+    // standing still, the gaze wanders a little (a slow look around); with 見回す on, the head
+    // follows the phone's orientation instead (small-angle view rotation)
     const idle = 1 - Math.min(1, state.speed / WALK_SPEED);
-    yaw += ((state.sway ? idle * 0.06 * noise1(time * 0.08 + 1200) : 0) - yaw) * Math.min(1, dt * 1.5);
+    const yawT = look.on ? look.yaw : state.sway ? idle * 0.06 * noise1(time * 0.08 + 1200) : 0;
+    yaw += (yawT - yaw) * Math.min(1, dt * (look.on ? 8 : 1.5));
     cx = W / 2 + f * Math.tan(yaw);
+    if (look.on) cy += f * Math.tan(look.pitch);
 
     ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
     drawSky();
@@ -2373,6 +2377,23 @@
     e.currentTarget.classList.toggle('on', !!min);
     if (audio && audio.ac.state === 'suspended') audio.ac.resume();
     updateTimer();
+  });
+  // 見回す: the phone's orientation turns the head (relative to where it pointed when enabled)
+  const look = { on: false, yaw: 0, pitch: 0, a0: null, b0: null };
+  window.addEventListener('deviceorientation', e => {
+    if (!look.on || e.alpha == null) return;
+    if (look.a0 === null) { look.a0 = e.alpha; look.b0 = e.beta; }
+    const da = ((e.alpha - look.a0 + 540) % 360) - 180;        // unwrap the compass angle
+    look.yaw = clamp(da * Math.PI / 180, -0.35, 0.35);           // turn left → the scene slides right
+    look.pitch = clamp((e.beta - look.b0) * Math.PI / 180, -0.26, 0.26);
+  });
+  $('lookBtn').addEventListener('click', async e => {
+    const btn = e.currentTarget;
+    if (!look.on && typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      try { if (await DeviceOrientationEvent.requestPermission() !== 'granted') return; } catch (_) { return; }
+    }
+    look.on = !look.on; look.a0 = null; look.yaw = 0; look.pitch = 0;
+    btn.classList.toggle('on', look.on);
   });
   $('swayBtn').addEventListener('click', e => {
     state.sway = !state.sway;
