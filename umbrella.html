@@ -1275,7 +1275,8 @@
         const D = sampleD(state.rateNow);
         cdrops.push(makeCDrop(spot[0], spot[1], Math.PI / 6 * D ** 3 * (0.8 + Math.random())));
       }
-      nextCanopyHit += -Math.log(1 - Math.random()) / lambda;
+      // (capped: under the arcade λ → 0, and we must not schedule the next bead minutes ahead)
+      nextCanopyHit += Math.min(0.5, -Math.log(1 - Math.random()) / Math.max(lambda, 1e-6));
     }
     // continuous inflow to the rib tips from all the rain on each panel
     const Qtip = Math.PI * U.R * U.R * state.rateNow * (1 - cover) / 3.6e6 / U.ribs;   // m³/s
