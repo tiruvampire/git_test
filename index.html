@@ -90,6 +90,7 @@
     <button id="glassBtn" class="on">窓ガラス</button>
     <button id="tiltBtn">傾き</button>
     <button id="thunderBtn">雷</button>
+    <button id="timerBtn">タイマー</button>
   </div>
   <div id="stats"></div>
 </div>
@@ -130,6 +131,8 @@
     gx: 0, gy: 1,     // unit gravity direction in screen coords (y down)
     gip: 1,           // fraction of gravity lying in the glass plane
     theta: 0,         // world rotation so rain falls along true gravity
+    timerEnd: 0,      // sleep timer (performance.now() ms), 0 = off
+    fade: 1,          // sleep-timer fade gain
   };
 
   // ---------- Rain physics ----------
@@ -1356,7 +1359,7 @@
 
     function update() {
       const now = ac.currentTime, R = state.rateNow, u = Math.abs(state.wind);
-      master.gain.setTargetAtTime(state.volume, now, 0.1);
+      master.gain.setTargetAtTime(state.volume * state.fade, now, 0.1);
       open.gain.setTargetAtTime(state.glass ? 0 : 1, now, 0.25);
       pane.gain.setTargetAtTime(state.glass ? 1 : 0, now, 0.25);
       // acoustic power ∝ number of impacts ∝ R; blend a sparse and a dense texture by log R
@@ -1627,7 +1630,21 @@
     }
   }
 
+  // Sleep timer: the last 90 s fade out linearly in decibels (to −40 dB), which the ear hears
+  // as an even, natural fade rather than a sudden drop at the end
+  const TIMER_STEPS = [0, 15, 30, 60];
+  let timerIdx = 0;
+  function updateTimer() {
+    const btn = document.getElementById('timerBtn');
+    if (!state.timerEnd) { state.fade = 1; btn.textContent = 'タイマー'; return; }
+    const rem = (state.timerEnd - performance.now()) / 1000;
+    state.fade = rem > 90 ? 1 : rem > 0 ? Math.pow(10, -40 * (1 - rem / 90) / 20) : 0;
+    btn.textContent = rem > 0 ? `⏲ ${Math.ceil(rem / 60)}分` : '⏲ 終了';
+    if (rem <= 0 && audio && audio.ac.state === 'running') audio.ac.suspend();
+  }
+
   function updateStats() {
+    updateTimer();
     const R = state.rateNow, L = mpLambda(R), meanD = 0.5 + 1 / L;
     statsEl.innerHTML =
       `降水強度 ${R.toFixed(1)} mm/h（${rainClass(R)}）・風速 ${state.wind.toFixed(1)} m/s<br>` +
@@ -1686,6 +1703,15 @@
   });
 
   $('thunderBtn').addEventListener('click', () => lightning());
+
+  $('timerBtn').addEventListener('click', e => {
+    timerIdx = (timerIdx + 1) % TIMER_STEPS.length;
+    const min = TIMER_STEPS[timerIdx];
+    state.timerEnd = min ? performance.now() + min * 60000 : 0;
+    e.currentTarget.classList.toggle('on', !!min);
+    if (audio && audio.ac.state === 'suspended') audio.ac.resume();
+    updateTimer();
+  });
 
   $('tiltBtn').addEventListener('click', async e => {
     const btn = e.currentTarget;
