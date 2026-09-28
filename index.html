@@ -117,7 +117,8 @@
   let W = 0, H = 0, DPR = 1, B = 0, ox = 0, oy = 0, f = 1, cx = 0, cy = 0;
 
   const state = {
-    rate: 7,          // rain rate R (mm/h)
+    rate: 7,          // mean rain rate R (mm/h) chosen by the user
+    rateNow: 7,       // instantaneous rain rate with natural 1/f fluctuation
     wind0: 2,         // mean wind (m/s, + = to the right)
     wind: 2,          // wind including gusts
     volume: 0.6,
@@ -149,6 +150,29 @@
     return c;
   };
   const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+
+  // smooth 1D value noise in [-1, 1]
+  const NOISE_N = 512, noiseTab = new Float32Array(NOISE_N).map(() => Math.random() * 2 - 1);
+  function noise1(x) {
+    const i = Math.floor(x), t = x - i, u = t * t * (3 - 2 * t);
+    const a = noiseTab[i & (NOISE_N - 1)], b = noiseTab[(i + 1) & (NOISE_N - 1)];
+    return a + (b - a) * u;
+  }
+  // 1/f ("pink") fluctuation: octaves with amplitude ∝ 1/√f, as found in natural rain and wind
+  function pink1(t, seed) {
+    let v = 0, norm = 0;
+    for (let o = 0; o < 6; o++) {
+      const fr = Math.pow(2, o), w = 1 / Math.sqrt(fr);
+      v += w * noise1(t * fr + seed + o * 37.1); norm += w;
+    }
+    return v / norm * 1.8;
+  }
+  // Taylor's frozen turbulence: a gust pattern is carried downstream at the mean wind speed,
+  // so neighbouring drops feel coherent gusts that sweep across the scene
+  function gustField(x, z, t) {
+    const X = x - state.wind0 * t + z * 0.6;
+    return 0.6 * noise1(X / 28 + t * 0.05) + 0.3 * noise1(X / 9 + 100 + t * 0.15) + 0.15 * noise1(X / 3.5 + 200 + t * 0.4);
+  }
 
   // ---------- Background (night street seen from a window) ----------
   let bgSharp, bgBlur, bgFlip, rainLights = [], puddles = [];
@@ -346,7 +370,7 @@
   function spawnDrop(d, initial) {
     // pdf ∝ z instead of the frustum's z²: far drops are sub-pixel, so we spend the budget near the eye
     d.z = Math.sqrt(ZN * ZN + Math.random() * (ZF * ZF - ZN * ZN));
-    d.D = sampleD(state.rate);
+    d.D = sampleD(state.rateNow);
     d.v = termVel(d.D);
     // only the part of the (possibly rotated) world that is actually on screen
     const c = Math.abs(Math.cos(state.theta)), sn = Math.abs(Math.sin(state.theta));
@@ -355,7 +379,12 @@
     d.xr = hw * d.z / f;
     const ytop = (cy - H / 2 + hh) * d.z / f;
     const drift = state.wind * (ytop + HC) / d.v;
-    d.x = d.xl - Math.max(0, drift) + Math.random() * (d.xr - d.xl + Math.abs(drift));
+    // rain falls in curtains (bands of denser rain drifting with the wind): rejection sampling
+    for (let k = 0; k < 4; k++) {
+      d.x = d.xl - Math.max(0, drift) + Math.random() * (d.xr - d.xl + Math.abs(drift));
+      const c = 0.5 + 0.5 * noise1((d.x - state.wind0 * time) / 7 + 300 + time * 0.03);
+      if (Math.random() < 0.35 + 0.65 * c) break;
+    }
     d.y = initial ? -HC + Math.random() * (ytop + HC) : ytop + Math.random() * 0.3;
     d.vx = state.wind;
     return d;
@@ -364,7 +393,7 @@
   function targetDropCount() {
     const c = Math.abs(Math.cos(state.theta)), sn = Math.abs(Math.sin(state.theta));
     const area = (W * c + H * sn) * (W * sn + H * c);
-    return Math.min(4000, 1.6 * visibleDensity(state.rate) * area / (390 * 844));
+    return Math.min(4000, 1.6 * visibleDensity(state.rateNow) * area / (390 * 844));
   }
 
   const RHO = 1000, SIGMA = 0.072, MU = 0.001;   // water: density, surface tension, viscosity (SI)
@@ -419,10 +448,12 @@
 
     const U = state.wind;
     const margin = 2 + Math.abs(U) * 3;
+    const gAmp = 0.35 * Math.abs(state.wind0) + 0.6;
     for (const d of drops) {
-      // horizontal drag relaxes the drop's velocity toward the wind, τ = v_t / g
+      // horizontal drag relaxes the drop's velocity toward the local wind, τ = v_t / g
       const tau = d.v / G;
-      d.vx += (U - d.vx) * Math.min(1, dt / tau);
+      const Ul = state.wind0 + gAmp * gustField(d.x, d.z, time);
+      d.vx += (Ul - d.vx) * Math.min(1, dt / tau);
       d.x += d.vx * dt;
       d.y -= d.v * dt;
       if (d.y <= -HC) { impact(d); spawnDrop(d, false); }
@@ -589,7 +620,7 @@
   function seedGlass() {
     const n = (W * H) / (390 * 844) * (60 + 12 * Math.sqrt(state.rate));
     for (let i = 0; i < n; i++) {
-      const D = sampleD(state.rate) * (0.4 + Math.random() * 0.5);
+      const D = sampleD(state.rateNow) * (0.4 + Math.random() * 0.5);
       const d = makeGlassDrop(Math.random() * W, Math.random() * H, Math.PI / 6 * D * D * D);
       d.fresh = false;
       glassDrops.push(d);
@@ -597,7 +628,7 @@
   }
 
   function glassImpact() {
-    const D = sampleD(state.rate);
+    const D = sampleD(state.rateNow);
     const V = Math.PI / 6 * D * D * D;
     const x = Math.random() * W, y = Math.random() * H;
     if (D > 2.5) {
@@ -618,7 +649,7 @@
     if (!state.glass) { glassDrops.length = 0; return; }
 
     // Poisson arrivals; more rain hits the window when the wind blows
-    const lambda = 4 * Math.pow(state.rate, 0.75) * (0.35 + Math.abs(state.wind) / 6) * (W * H) / (390 * 844);
+    const lambda = 4 * Math.pow(state.rateNow, 0.75) * (0.35 + Math.abs(state.wind) / 6) * (W * H) / (390 * 844);
     nextGlassHit -= dt;
     while (nextGlassHit <= 0) {
       if (glassDrops.length < 650) glassImpact();
@@ -958,7 +989,7 @@
     }
 
     function update() {
-      const now = ac.currentTime, r = Math.min(1, Math.sqrt(state.rate / 60)), u = Math.abs(state.wind);
+      const now = ac.currentTime, r = Math.min(1, Math.sqrt(state.rateNow / 60)), u = Math.abs(state.wind);
       master.gain.setTargetAtTime(state.volume, now, 0.1);
       bedGain.gain.setTargetAtTime((0.1 + 0.9 * r) * (state.glass ? 0.8 : 1), now, 0.3);
       bedLP.frequency.setTargetAtTime((state.glass ? 1200 : 1800) + 4000 * r, now, 0.3);
@@ -1029,8 +1060,8 @@
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now; time += dt;
 
-    const gustAmp = 0.25 * Math.abs(state.wind0) + 0.3;
-    state.wind = state.wind0 + gustAmp * (0.6 * Math.sin(0.53 * time) + 0.3 * Math.sin(1.7 * time + 1.3) + 0.2 * Math.sin(3.1 * time + 0.4));
+    state.wind = state.wind0 + (0.35 * Math.abs(state.wind0) + 0.6) * gustField(0, 5, time);
+    state.rateNow = state.rate * Math.exp(0.28 * pink1(time * 0.05, 500));
 
     if (state.rate > 25) {
       nextAutoBolt -= dt;
@@ -1043,7 +1074,7 @@
     updateGlass(dt);
 
     if (audio) {
-      plinkAcc += dt * Math.min(35, 1.5 * Math.pow(state.rate, 0.7)) * (state.glass ? 0.5 : 1);
+      plinkAcc += dt * Math.min(35, 1.5 * Math.pow(state.rateNow, 0.7)) * (state.glass ? 0.5 : 1);
       while (plinkAcc >= 1) { if (Math.random() < 0.9) audio.plink(); plinkAcc--; }
       audioT += dt;
       if (audioT > 0.1) { audio.update(); audioT = 0; }
@@ -1064,7 +1095,7 @@
     }
     ctx.drawImage(state.glass ? bgBlur : bgSharp, -ox, -oy, B, B);
     // heavy rain scatters light: visibility drops as the rain rate rises
-    ctx.fillStyle = `rgba(55,60,75,${(0.28 * (1 - Math.exp(-state.rate / 40))).toFixed(3)})`;
+    ctx.fillStyle = `rgba(55,60,75,${(0.28 * (1 - Math.exp(-state.rateNow / 40))).toFixed(3)})`;
     ctx.fillRect(-ox, -oy, B, B);
     drawBolt();
     drawRain();
@@ -1087,7 +1118,7 @@
   }
 
   function updateStats() {
-    const R = state.rate, L = mpLambda(R), meanD = 0.5 + 1 / L;
+    const R = state.rateNow, L = mpLambda(R), meanD = 0.5 + 1 / L;
     statsEl.innerHTML =
       `降水強度 ${R.toFixed(1)} mm/h（${rainClass(R)}）・風速 ${state.wind.toFixed(1)} m/s<br>` +
       `平均雨滴径 ${meanD.toFixed(2)} mm・終端速度 ${termVel(meanD).toFixed(1)} m/s・` +
