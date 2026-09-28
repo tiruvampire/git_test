@@ -151,7 +151,7 @@
   const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
 
   // ---------- Background (night street seen from a window) ----------
-  let bgSharp, bgBlur, bgFlip, rainLights = [];
+  let bgSharp, bgBlur, bgFlip, rainLights = [], puddles = [];
 
   function paintBackground() {
     const bs = Math.min(DPR, 1.5);
@@ -217,6 +217,57 @@
       g.beginPath(); g.arc(0, 0, r * 0.7, 0, TAU); g.fill();
       g.restore();
     }
+
+    // puddles: still water is a near-perfect mirror, so reflections there are sharp, not smeared
+    puddles = [];
+    for (let i = 0; i < 16; i++) {
+      const x = (Math.random() - 0.5) * 12, z = 3.5 + Math.pow(Math.random(), 1.4) * 28;
+      for (let k = 0; k < 3; k++) {
+        puddles.push({ x: x + (Math.random() - 0.5) * 1.5, z: z + (Math.random() - 0.5) * 1.2,
+          rx: 0.4 + Math.random() * 1.6, rz: 0.25 + Math.random() * 0.9 });
+      }
+    }
+    // drawn on a layer, then composited twice (blurred + sharp) so the water line is soft
+    const pl = mkCanvas(bgSharp.width, bgSharp.height), pg = pl.getContext('2d');
+    pg.scale(bs, bs);
+    { const g = pg;
+    g.save();
+    g.beginPath();
+    for (const q of puddles) {
+      const [px, py] = P(q.x, -HC, q.z);
+      g.moveTo(px + f * q.rx / q.z, py);
+      g.ellipse(px, py, f * q.rx / q.z, f * HC * q.rz / (q.z * q.z), 0, 0, TAU);
+    }
+    g.clip();
+    gr = g.createLinearGradient(0, hy, 0, B);
+    gr.addColorStop(0, 'rgba(42,36,50,0.9)');       // mirrored horizon glow
+    gr.addColorStop(0.5, 'rgba(14,17,28,0.9)');     // mirrored zenith
+    g.fillStyle = gr;
+    g.fillRect(0, hy, B, B - hy);
+    for (const L of lights) {
+      const [sx] = P(L.x, L.y, L.z);
+      const [, my] = P(L.x, -2 * HC - L.y, L.z);
+      const r = f * L.size / L.z;
+      g.save();
+      g.translate(sx, my);
+      g.scale(1, 1.8);
+      const rg = g.createRadialGradient(0, 0, 0, 0, 0, r * 0.6);
+      rg.addColorStop(0, `rgba(${L.col},0.75)`);
+      rg.addColorStop(0.3, `rgba(${L.col},0.2)`);
+      rg.addColorStop(1, `rgba(${L.col},0)`);
+      g.fillStyle = rg;
+      g.beginPath(); g.arc(0, 0, r * 0.6, 0, TAU); g.fill();
+      g.restore();
+    }
+    g.restore();
+    }
+    const pb = mkCanvas(pl.width / 6, pl.height / 6);
+    pb.getContext('2d').drawImage(pl, 0, 0, pb.width, pb.height);
+    g.save();
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalAlpha = 0.45; g.drawImage(pb, 0, 0, pl.width, pl.height);
+    g.globalAlpha = 0.4; g.drawImage(pl, 0, 0);
+    g.restore();
 
     rainLights = lights.filter(L => L.pole !== undefined && L.z < 32).map(L => ({ x: L.x, y: L.y, z: L.z, I: 16 }));
     rainLights.push({ x: 0, y: 0.2, z: -0.6, I: 0.35 });   // warm light spilling from our own room
@@ -316,24 +367,46 @@
     return Math.min(4000, 1.6 * visibleDensity(state.rate) * area / (390 * 844));
   }
 
+  const RHO = 1000, SIGMA = 0.072, MU = 0.001;   // water: density, surface tension, viscosity (SI)
+  const RIPPLE_MODES = [0.012, 0.02, 0.035].map((lambda, i) => {
+    const k = TAU / lambda, nu = MU / RHO;
+    const w = Math.sqrt(G * k + SIGMA / RHO * k ** 3);
+    const cg = (G + 3 * SIGMA / RHO * k * k) / (2 * w);     // group velocity
+    return { cg, damp: 2 * nu * k * k + 1.2, w: [0.7, 1, 0.8][i] };   // + radiation/geometric loss
+  });
+  const inPuddle = (x, z) => puddles.some(q => ((x - q.x) / q.rx) ** 2 + ((z - q.z) / q.rz) ** 2 < 1);
+
   function impact(d) {
     if (d.z > 12) return;
-    if (ripples.length < 320) {
-      ripples.push({ x: d.x, z: d.z, age: 0, life: 0.45 + d.D * 0.12, amp: Math.min(1, d.D / 3) });
+    const puddle = inPuddle(d.x, d.z);
+    if (puddle && ripples.length < 320) {
+      // ripple energy ∝ drop kinetic energy; amplitude ∝ √E
+      const E = d.D ** 3 * d.v * d.v;
+      ripples.push({ x: d.x, z: d.z, age: 0, amp: Math.min(1, Math.sqrt(E) / 40), D: d.D });
     }
-    if (d.z < 7 && d.D > 0.9 && splashes.length < 700) {
-      // crown splash: secondary droplets thrown out ballistically
-      const n = Math.min(8, (d.D * 1.6 + Math.random() * 2) | 0);
-      const s0 = 0.35 * Math.sqrt(d.v);
+    // Splash or deposition? Cossali et al. (1997) for a drop onto a liquid film:
+    // splash when K = We·Oh^−0.4 > 2100 + 5880·δ^1.44 (δ = film thickness / D)
+    const Dm = d.D * 1e-3;
+    const We = RHO * Dm * d.v * d.v / SIGMA;
+    const Oh = MU / Math.sqrt(RHO * SIGMA * Dm);
+    const K = We * Math.pow(Oh, -0.4);
+    const film = puddle ? 5 : 0.3;                          // mm of water
+    const Kc = 2100 + 5880 * Math.pow(Math.min(film / d.D, 1.5), 1.44);
+    if (d.z < 7 && K > Kc && splashes.length < 700) {
+      // crown splash: secondary droplets from the crown rim, thrown out ballistically;
+      // more energetic impacts eject more (and relatively smaller) droplets
+      const ex = K / Kc - 1;
+      const n = Math.min(12, (2 + 3 * ex + Math.random() * 2) | 0);
+      const s0 = d.v * (0.12 + 0.05 * Math.min(ex, 3));
       for (let k = 0; k < n; k++) {
         const el = (15 + Math.random() * 50) * Math.PI / 180, az = Math.random() * TAU;
-        const sp = s0 * (0.5 + Math.random());
+        const sp = s0 * (0.6 + Math.random() * 0.8);
         splashes.push({
           x: d.x, y: -HC + 0.001, z: d.z,
           vx: sp * Math.cos(el) * Math.cos(az) + d.vx * 0.2,
           vy: sp * Math.sin(el),
           vz: sp * Math.cos(el) * Math.sin(az),
-          D: d.D * (0.15 + Math.random() * 0.25),
+          D: d.D * (0.1 + Math.random() * 0.25) / Math.sqrt(1 + ex),
         });
       }
     }
@@ -365,7 +438,7 @@
     for (let i = ripples.length - 1; i >= 0; i--) {
       const r = ripples[i];
       r.age += dt;
-      if (r.age > r.life) { ripples[i] = ripples[ripples.length - 1]; ripples.pop(); }
+      if (r.age > 1.6) { ripples[i] = ripples[ripples.length - 1]; ripples.pop(); }
     }
   }
 
@@ -438,18 +511,19 @@
 
     const rp = [new Path2D(), new Path2D(), new Path2D()];
     for (const r of ripples) {
-      const t = r.age / r.life;
-      const a = (1 - t) * (1 - t) * r.amp;
-      const rad = 0.004 + 0.23 * r.age;       // capillary–gravity waves travel ≈ 0.23 m/s
       const sx = cx + f * r.x / r.z, sy = cy + f * HC / r.z;
-      const rx = f * rad / r.z, ry = rx * HC / r.z;
-      if (sx + rx < -ox || sx - rx > W + ox || sy > H + oy) continue;
-      const p = rp[Math.min(2, (a * 3) | 0)];
-      p.moveTo(sx + rx, sy);
-      p.ellipse(sx, sy, rx, ry, 0, 0, TAU);
-      if (r.amp > 0.5 && t < 0.6) {
-        p.moveTo(sx + rx * 0.55, sy);
-        p.ellipse(sx, sy, rx * 0.55, ry * 0.55, 0, 0, TAU);
+      if (sx < -ox - 50 || sx > W + ox + 50 || sy > H + oy) continue;
+      // A dispersive wave packet: each wavenumber k travels at its group velocity
+      // c_g = dω/dk with ω² = gk + (σ/ρ)k³, and is damped viscously as exp(−2νk²t).
+      // Short capillary waves lead, longer gravity waves trail, radius spreads ∝ 1/√r.
+      for (const w of RIPPLE_MODES) {
+        const rad = 0.003 + w.cg * r.age;
+        const a = r.amp * Math.exp(-w.damp * r.age) * Math.min(1, r.age * 30) / Math.sqrt(1 + rad * 40) * w.w;
+        if (a < 0.05) continue;
+        const rx = f * rad / r.z, ry = rx * HC / r.z;
+        const p = rp[Math.min(2, (a * 4) | 0)];
+        p.moveTo(sx + rx, sy);
+        p.ellipse(sx, sy, rx, ry, 0, 0, TAU);
       }
     }
     ctx.lineWidth = state.glass ? 2 : 0.8;
